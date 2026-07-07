@@ -1,4 +1,4 @@
-# 🏀 NBA-Predictor
+# NBA-Predictor
 
 An NBA analytics platform that aggregates real statistics and player
 injury/availability data from multiple sports APIs, exposes them through a
@@ -6,7 +6,7 @@ resilient async **FastAPI** backend, and visualizes them in an interactive
 **Streamlit + Plotly** dashboard — including **Monte Carlo** simulations for
 game predictions.
 
-## 🎯 Purpose
+## Purpose
 
 The goal of the project is to turn raw NBA data into actionable insight:
 
@@ -19,7 +19,7 @@ The goal of the project is to turn raw NBA data into actionable insight:
 - **Visualize** everything in a clean, interactive web dashboard so results are
   easy to explore.
 
-## 🧱 Architecture
+## Architecture
 
 The project is organized into clear, decoupled layers:
 
@@ -55,7 +55,7 @@ NBA-predictor/
 | `GET`  | `/api/v1/health-check`               | Status of the connected APIs |
 | `GET`  | `/api/v1/compare/teams`              | Health/availability comparison between teams |
 
-## 🛠️ Tech Stack
+##  Tech Stack
 
 **Language:** Python 3
 
@@ -70,7 +70,7 @@ NBA-predictor/
 | **Config** | python-dotenv (`.env`) |
 | **Testing** | pytest, pytest-asyncio |
 
-## 🚀 Getting Started
+##  Getting Started
 
 ### 1. Install dependencies
 
@@ -110,7 +110,7 @@ uvicorn server.main:app --reload
 pytest
 ```
 
-## 🔒 Security
+## Security
 
 Secrets are kept out of version control: `.env`, `.env.local`, IDE settings,
 and other sensitive files are excluded via `.gitignore`. Never commit your
