@@ -41,7 +41,7 @@ htmlcov/
 # Streamlit
 .streamlit/
 *.streamlit.app
- 
+
 # OS
 .DS_Store
 Thumbs.db

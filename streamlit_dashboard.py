@@ -1,11 +1,10 @@
 """
 NBA Predictor Dashboard - Streamlit
-Datos reales via nba_api + RapidAPI (NBA API Free Data)
+Datos reales vía la API pública de ESPN (sin API key, sin cuota).
 """
 
 import streamlit as st
 import plotly.express as px
-import plotly.graph_objects as go
 import pandas as pd
 import asyncio
 import os
@@ -13,8 +12,28 @@ import logging
 from datetime import datetime
 from dotenv import load_dotenv
 
+from api.nba_api_client import TEAM_NAME_TO_ID
+
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
+
+
+def get_current_nba_season() -> int:
+    """'year' que espera la API: el año en que TERMINA la temporada
+    (convención de ESPN — confirmado empíricamente: year=2024 devuelve
+    los resultados reales de la temporada 2023-24).
+
+    La temporada corre de octubre a junio. Si estamos en octubre-diciembre
+    ya arrancó la que termina el año siguiente; en receso (jul-sep) se
+    adelanta a la que está por comenzar, aunque todavía no tenga datos.
+    """
+    now = datetime.now()
+    if now.month >= 7:
+        return now.year + 1
+    return now.year
+
+
+CURRENT_SEASON = get_current_nba_season()
 
 st.set_page_config(page_title="NBA Predictor", layout="wide")
 
@@ -26,14 +45,8 @@ def init_clients():
     from api.sportsdata_api_client import SportsDataClient
     from api.api_manager import APIManager
 
-    nba_client = NBAApiClient(
-        api_key=os.getenv("RAPIDAPI_KEY", ""),
-        api_host=os.getenv("RAPIDAPI_HOST", "nba-api-free-data.p.rapidapi.com")
-    )
-    sportsdata_client = SportsDataClient(
-        api_key=os.getenv("RAPIDAPI_KEY", ""),
-        api_host=os.getenv("RAPIDAPI_HOST", "nba-api-free-data.p.rapidapi.com")
-    )
+    nba_client = NBAApiClient()
+    sportsdata_client = SportsDataClient()
     manager = APIManager(
         nba_client=nba_client,
         sportsdata_client=sportsdata_client,
@@ -81,7 +94,18 @@ def get_standings(season):
 def get_recent_games(team, season):
     if not api_ok:
         return []
-    return nba_client.get_recent_games(team, season)
+
+    team_id = TEAM_NAME_TO_ID.get(team)
+    if not team_id:
+        return []
+
+    async def _fetch():
+        return await sportsdata_client.get_team_recent_games(team_id, season)
+    try:
+        return run_async(_fetch())
+    except Exception as e:
+        st.warning(f"Historial no disponible: {e}")
+        return []
 
 @st.cache_data(ttl=300)
 def get_scoreboard(date_str):
@@ -93,24 +117,20 @@ def get_scoreboard(date_str):
         st.warning(f"Scoreboard no disponible: {e}")
         return []
 
-@st.cache_data(ttl=3600)
-def get_rapidapi_standings(season):  # deprecated - not used
-    async def _fetch():
-        return await sportsdata_client.get_standings(season)
-    try:
-        return run_async(_fetch())
-    except Exception as e:
-        return []
-
 # ─── UI ───────────────────────────────────────────────────────────────────────
 
-st.title("🏀 NBA Predictor 2024-25")
-st.caption("Datos reales: NBA API + RapidAPI NBA Free Data")
+st.title(f"🏀 NBA Predictor {CURRENT_SEASON - 1}-{str(CURRENT_SEASON)[-2:]}")
+st.caption("Datos reales: API pública de ESPN")
 
 # Sidebar
 with st.sidebar:
     st.header("⚙️ Configuración")
-    season = st.selectbox("Temporada", [2024, 2023, 2022], index=0)
+    season = st.selectbox(
+        "Temporada",
+        [CURRENT_SEASON, CURRENT_SEASON - 1, CURRENT_SEASON - 2],
+        index=0,
+        format_func=lambda y: f"{y - 1}-{str(y)[-2:]}"
+    )
     st.divider()
     if st.button("🧹 Limpiar caché"):
         st.cache_data.clear()
@@ -136,40 +156,54 @@ with tab1:
             st.metric("Losses", stats["losses"])
             st.metric("Win %", f"{stats['win_pct']:.1%}")
             st.metric("PPG", stats["points"])
-            st.metric("APG", stats["assists"])
-            st.metric("RPG", stats["rebounds"])
-            st.metric("FG%", f"{stats['fg_pct']:.1%}")
-            st.metric("3P%", f"{stats['fg3_pct']:.1%}")
         else:
             st.warning("Sin datos — verifica conexión a NBA API")
 
     with col2:
         st.subheader(f"Últimos 10 juegos — {team_sel}")
-        with st.spinner("Cargando historial..."):
+        with st.spinner(f"Buscando el historial de {team_sel} en {season - 1}-{str(season)[-2:]}..."):
             games = get_recent_games(team_sel, season)
 
         if games:
-            df_games = pd.DataFrame(games)
+            rows = []
+            for g in games:
+                is_home = team_sel in g.home_team
+                team_score = g.home_score if is_home else g.away_score
+                opp_score = g.away_score if is_home else g.home_score
+                rows.append({
+                    "Fecha": f"{g.date[:4]}-{g.date[4:6]}-{g.date[6:]}",
+                    "Rival": g.away_team if is_home else g.home_team,
+                    "L/V": "Local" if is_home else "Visita",
+                    "Resultado": "W" if team_score > opp_score else "L",
+                    "Puntos": team_score,
+                    "Puntos rival": opp_score,
+                })
+            df_games = pd.DataFrame(rows).sort_values("Fecha")
+
             fig = px.bar(
-                df_games, x="date", y="points", color="result",
+                df_games, x="Fecha", y="Puntos", color="Resultado",
                 color_discrete_map={"W": "#00b09b", "L": "#e74c3c"},
                 title="Puntos por partido"
             )
             fig.update_layout(xaxis_tickangle=-45)
             st.plotly_chart(fig, use_container_width=True)
             st.dataframe(
-                df_games[["date", "matchup", "result", "points", "rebounds", "assists"]],
-                use_container_width=True
+                df_games[["Fecha", "Rival", "L/V", "Resultado", "Puntos", "Puntos rival"]],
+                use_container_width=True, hide_index=True
             )
         else:
-            st.warning("Sin historial de juegos")
+            st.warning("Sin historial de juegos para esta temporada")
 
 # ── Tab 2: Scoreboard ─────────────────────────────────────────────────────────
 with tab2:
-    st.subheader("🏟️ Scoreboard — Partidos de hoy")
+    st.subheader("🏟️ Scoreboard")
+    st.caption(
+        "Elige cualquier fecha, incluso de temporadas anteriores — "
+        "la fecha por defecto se ajusta a la temporada seleccionada arriba."
+    )
 
-    today = datetime.now().strftime("%Y%m%d")
-    date_input = st.date_input("Fecha", datetime.now())
+    default_date = datetime.now() if season == CURRENT_SEASON else datetime(season, 4, 15)
+    date_input = st.date_input("Fecha", default_date, key=f"scoreboard_date_{season}")
     date_str = date_input.strftime("%Y%m%d")
 
     with st.spinner("Consultando RapidAPI..."):
@@ -236,43 +270,31 @@ with tab4:
             stats_b = get_team_stats(team_b, season)
 
         if stats_a and stats_b:
-            # Radar chart
-            categories = ["Win%", "PPG", "APG", "RPG", "FG%", "3P%"]
-            vals_a = [
-                stats_a["win_pct"] * 100,
-                stats_a["points"],
-                stats_a["assists"],
-                stats_a["rebounds"],
-                stats_a["fg_pct"] * 100,
-                stats_a["fg3_pct"] * 100
-            ]
-            vals_b = [
-                stats_b["win_pct"] * 100,
-                stats_b["points"],
-                stats_b["assists"],
-                stats_b["rebounds"],
-                stats_b["fg_pct"] * 100,
-                stats_b["fg3_pct"] * 100
-            ]
-
-            fig = go.Figure()
-            fig.add_trace(go.Scatterpolar(r=vals_a, theta=categories, fill="toself", name=team_a))
-            fig.add_trace(go.Scatterpolar(r=vals_b, theta=categories, fill="toself", name=team_b))
-            fig.update_layout(title="Radar de estadísticas", polar=dict(radialaxis=dict(visible=True)))
+            # Comparación Win% y PPG (únicas métricas que la API provee)
+            df_chart = pd.DataFrame({
+                "Equipo": [team_a, team_a, team_b, team_b],
+                "Métrica": ["Win %", "PPG", "Win %", "PPG"],
+                "Valor": [
+                    stats_a["win_pct"] * 100, stats_a["points"],
+                    stats_b["win_pct"] * 100, stats_b["points"]
+                ]
+            })
+            fig = px.bar(
+                df_chart, x="Métrica", y="Valor", color="Equipo",
+                barmode="group", title="Win % y PPG"
+            )
             st.plotly_chart(fig, use_container_width=True)
 
             # Tabla comparativa
             df_comp = pd.DataFrame({
-                "Stat": ["Wins", "Losses", "Win %", "PPG", "APG", "RPG", "FG%", "3P%"],
+                "Stat": ["Wins", "Losses", "Win %", "PPG"],
                 team_a: [
                     stats_a["wins"], stats_a["losses"], f"{stats_a['win_pct']:.1%}",
-                    stats_a["points"], stats_a["assists"], stats_a["rebounds"],
-                    f"{stats_a['fg_pct']:.1%}", f"{stats_a['fg3_pct']:.1%}"
+                    stats_a["points"]
                 ],
                 team_b: [
                     stats_b["wins"], stats_b["losses"], f"{stats_b['win_pct']:.1%}",
-                    stats_b["points"], stats_b["assists"], stats_b["rebounds"],
-                    f"{stats_b['fg_pct']:.1%}", f"{stats_b['fg3_pct']:.1%}"
+                    stats_b["points"]
                 ],
             })
             st.dataframe(df_comp, use_container_width=True)

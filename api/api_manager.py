@@ -194,27 +194,13 @@ class APIManager:
                 logger.warning(f"⚠️ No stats encontrados para jugador {player_id}")
                 return None
 
-            # Obtener estado de lesión (RapidAPI SportsData)
-            player_data = await self.sportsdata_client.get_player_by_id(
-                player_id=player_id,
-                season=season
-            )
-
-            # Extraer datos de lesión
+            # El API de RapidAPI SportsData en uso no expone datos de lesión
+            # por jugador (sin endpoint de injuries/status confiable) — se deja
+            # sin ajustar hasta que exista una fuente de datos real.
             is_injured = False
-            injury_status = "Healthy"
+            injury_status = "Unknown"
             injury_impact = 0.0
             return_date = None
-
-            if player_data and "injury" in player_data:
-                is_injured = True
-                injury_status = player_data["injury"].get("status", "Unknown")
-                injury_impact = self.sportsdata_client._calculate_player_impact(
-                    player_data,
-                    is_injured=True,
-                    injury=player_data.get("injury")
-                )
-                return_date = player_data["injury"].get("return_date")
 
             # Calcular impacto ajustado
             # Si el jugador está lesionado, su impacto en el análisis se reduce
@@ -290,8 +276,11 @@ class APIManager:
             )
 
             # Calcular salud del equipo (0.0 = muy lesionado, 1.0 = perfecto)
-            total_impact = sum(p.impact_on_team for p in player_availability if not p.available)
-            team_health_score = max(0.0, 1.0 - (total_impact / len(player_availability)))
+            if player_availability:
+                total_impact = sum(p.impact_on_team for p in player_availability if not p.available)
+                team_health_score = max(0.0, 1.0 - (total_impact / len(player_availability)))
+            else:
+                team_health_score = 1.0
 
             # Identificar ausencias críticas
             critical_absences = [

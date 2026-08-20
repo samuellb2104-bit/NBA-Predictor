@@ -1,12 +1,15 @@
 """
-NBA API Client - Usa RapidAPI (NBA API Free Data)
+NBA API Client - Datos públicos de ESPN (site.api.espn.com).
+
+No es una API oficial documentada, pero es de acceso libre (sin API key,
+sin cuota) y es la misma fuente que usan servicios de terceros como
+RapidAPI "NBA Free Data" por debajo.
 """
 
 import asyncio
 import logging
 import httpx
 from typing import Dict, List, Optional
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 logger = logging.getLogger(__name__)
 
@@ -21,24 +24,14 @@ TEAM_NAME_TO_ID = {
     "Kings": "24", "Timberwolves": "30",
 }
 
+STANDINGS_URL = "https://site.api.espn.com/apis/v2/sports/basketball/nba/standings"
+
 
 class NBAApiClient:
-    """Cliente NBA usando RapidAPI NBA Free Data"""
+    """Cliente de standings/stats de equipo usando la API pública de ESPN."""
 
-    BASE_URL = "https://nba-api-free-data.p.rapidapi.com"
-
-    def __init__(
-        self,
-        api_key: str = "",
-        api_host: str = "nba-api-free-data.p.rapidapi.com",
-        season: str = "2024-25"
-    ):
+    def __init__(self, season: str = "2024-25"):
         self.season = season
-        self.headers = {
-            "x-rapidapi-key": api_key,
-            "x-rapidapi-host": api_host,
-            "Content-Type": "application/json"
-        }
         self._standings_cache: Optional[List[Dict]] = None
         logger.info(f"✓ NBAApiClient inicializado (season: {season})")
 
@@ -51,54 +44,51 @@ class NBAApiClient:
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 return pool.submit(asyncio.run, coro).result()
 
-    async def _make_request(self, endpoint: str, params: Optional[Dict] = None) -> Dict:
-        async with httpx.AsyncClient(headers=self.headers, timeout=30) as client:
-            url = f"{self.BASE_URL}{endpoint}"
+    async def _make_request(self, url: str, params: Optional[Dict] = None) -> Dict:
+        async with httpx.AsyncClient(timeout=30) as client:
             response = await client.get(url, params=params)
             response.raise_for_status()
             return response.json()
 
     def get_standings(self, season: int = 2024) -> List[Dict]:
-        """Obtiene standings via RapidAPI."""
+        """Obtiene standings de ambas conferencias vía ESPN."""
         async def _fetch():
-            return await self._make_request(
-                "/nba-league-standings",
-                params={"year": str(season)}
-            )
+            return await self._make_request(STANDINGS_URL, params={"season": str(season)})
 
         try:
             data = self._run(_fetch())
             if not data:
                 return []
 
-            entries = data.get("response", {}).get("standings", {}).get("entries", [])
             result = []
+            for conference in data.get("children", []):
+                entries = conference.get("standings", {}).get("entries", [])
 
-            for entry in entries:
-                team_info = entry.get("team", {})
-                stats = entry.get("stats", [])
+                for entry in entries:
+                    team_info = entry.get("team", {})
+                    stats = entry.get("stats", [])
 
-                def get_stat(name):
-                    return next((s.get("value", 0) for s in stats if s.get("name") == name), 0)
+                    def get_stat(name, stats=stats):
+                        return next((s.get("value", 0) for s in stats if s.get("name") == name), 0)
 
-                wins = int(get_stat("wins"))
-                losses = int(get_stat("losses"))
-                total = wins + losses
-                win_pct = round(wins / total, 3) if total > 0 else 0.0
-                ppg = float(get_stat("avgPoints"))
-                streak = next((s.get("displayValue", "") for s in stats if s.get("name") == "streak"), "")
+                    wins = int(get_stat("wins"))
+                    losses = int(get_stat("losses"))
+                    total = wins + losses
+                    win_pct = round(wins / total, 3) if total > 0 else 0.0
+                    ppg = float(get_stat("avgPointsFor"))
+                    streak = next((s.get("displayValue", "") for s in stats if s.get("name") == "streak"), "")
 
-                result.append({
-                    "team": team_info.get("displayName", ""),
-                    "abbreviation": team_info.get("abbreviation", ""),
-                    "team_id": team_info.get("id", ""),
-                    "conference": "",
-                    "wins": wins,
-                    "losses": losses,
-                    "win_pct": win_pct,
-                    "points": ppg,
-                    "streak": streak,
-                })
+                    result.append({
+                        "team": team_info.get("displayName", ""),
+                        "abbreviation": team_info.get("abbreviation", ""),
+                        "team_id": team_info.get("id", ""),
+                        "conference": conference.get("abbreviation", ""),
+                        "wins": wins,
+                        "losses": losses,
+                        "win_pct": win_pct,
+                        "points": ppg,
+                        "streak": streak,
+                    })
 
             # Guardar en caché para get_team_stats
             self._standings_cache = result
@@ -144,7 +134,7 @@ class NBAApiClient:
         }
 
     def get_recent_games(self, team: str, season: int = 2024, limit: int = 10) -> List[Dict]:
-        """No disponible en esta API."""
+        """No disponible aquí — ver SportsDataClient.get_team_recent_games."""
         logger.info(f"ℹ️ get_recent_games no disponible para {team}")
         return []
 

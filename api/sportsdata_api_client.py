@@ -1,42 +1,15 @@
 """
-NBA API Free Data Client - RapidAPI
-Endpoints reales disponibles en el plan free.
-
-Host: nba-api-free-data.p.rapidapi.com
+NBA Scoreboard / Schedule Client - Datos públicos de ESPN
+(site.api.espn.com), sin API key ni cuota.
 """
 
-import asyncio
 import logging
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 from datetime import datetime
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class PlayerStatus:
-    """Estado de un jugador (reemplaza injuries)"""
-    player_id: str
-    player_name: str
-    team: str
-    status: str        # Active, Inactive, Injured, etc.
-    position: str
-    jersey: str
-
-
-@dataclass
-class TeamRecord:
-    """Record de un equipo desde RapidAPI"""
-    team_id: str
-    team_name: str
-    wins: int
-    losses: int
-    win_pct: float
-    conference: str
-    division: str
 
 
 @dataclass
@@ -52,45 +25,59 @@ class Scoreboard:
     date: str
 
 
+def _extract_score(value) -> int:
+    """El campo score de ESPN a veces es un número plano y a veces un
+    dict {value, displayValue} según el endpoint — se normaliza acá."""
+    if isinstance(value, dict):
+        value = value.get("value")
+    try:
+        return int(float(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _event_to_scoreboard(event: Dict) -> Optional[Scoreboard]:
+    """Convierte un 'event' crudo de ESPN (scoreboard o schedule, misma
+    forma) a Scoreboard. None si el evento no trae competición."""
+    competitions = event.get("competitions", [])
+    if not competitions:
+        return None
+
+    comp = competitions[0]
+    competitors = comp.get("competitors", [])
+    home = next((c for c in competitors if c.get("homeAway") == "home"), {})
+    away = next((c for c in competitors if c.get("homeAway") == "away"), {})
+    status = comp.get("status", {})
+
+    raw_date = event.get("date", "")  # ej. "2025-02-01T22:00Z"
+    date_str = raw_date[:10].replace("-", "") if raw_date else ""
+
+    return Scoreboard(
+        game_id=event.get("id", ""),
+        home_team=home.get("team", {}).get("displayName", ""),
+        away_team=away.get("team", {}).get("displayName", ""),
+        home_score=_extract_score(home.get("score")),
+        away_score=_extract_score(away.get("score")),
+        status=status.get("type", {}).get("description", ""),
+        period=status.get("period", 0),
+        date=date_str,
+    )
+
+
 class SportsDataClient:
-    """Cliente para NBA API Free Data en RapidAPI"""
+    """Cliente de scoreboard/calendario NBA usando la API pública de ESPN."""
 
-    BASE_URL = "https://nba-api-free-data.p.rapidapi.com"
+    BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba"
 
-    def __init__(
-        self,
-        api_key: str,
-        api_host: str = "nba-api-free-data.p.rapidapi.com",
-        timeout: int = 30
-    ):
-        self.api_key = api_key
-        self.api_host = api_host
+    def __init__(self, timeout: int = 30):
         self.timeout = timeout
-        self.headers = {
-            "x-rapidapi-key": api_key,
-            "x-rapidapi-host": api_host,
-            "Content-Type": "application/json"
-        }
-        self.client = None
 
-    async def __aenter__(self):
-        self.client = httpx.AsyncClient(headers=self.headers, timeout=self.timeout)
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.client:
-            await self.client.aclose()
-
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     async def _make_request(self, endpoint: str, params: Optional[Dict] = None) -> Dict:
-        """Request con reintentos automáticos."""
-        if not self.client:
-            self.client = httpx.AsyncClient(headers=self.headers, timeout=self.timeout)
-
         url = f"{self.BASE_URL}{endpoint}"
         try:
-            response = await self.client.get(url, params=params)
-            response.raise_for_status()
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(url, params=params)
+                response.raise_for_status()
             logger.info(f"✓ {endpoint}")
             return response.json()
         except httpx.HTTPStatusError as e:
@@ -102,8 +89,8 @@ class SportsDataClient:
 
     async def get_scoreboard(self, date: Optional[str] = None) -> List[Scoreboard]:
         """
-        Obtiene partidos del día (Scoreboard/Get by Date).
-        
+        Obtiene partidos del día.
+
         Args:
             date: Fecha en formato YYYYMMDD (default: hoy)
         """
@@ -111,23 +98,16 @@ class SportsDataClient:
             if not date:
                 date = datetime.now().strftime("%Y%m%d")
 
-            data = await self._make_request(
-                "/nba-scoreboard-by-date",
-                params={"date": date})
+            data = await self._make_request("/scoreboard", params={"dates": date})
 
-            games = []
-            scoreboard = data.get("scoreboard", {})
-            for game in scoreboard.get("games", []):
-                games.append(Scoreboard(
-                    game_id=game.get("gameId", ""),
-                    home_team=game.get("homeTeam", {}).get("teamName", ""),
-                    away_team=game.get("awayTeam", {}).get("teamName", ""),
-                    home_score=game.get("homeTeam", {}).get("score", 0),
-                    away_score=game.get("awayTeam", {}).get("score", 0),
-                    status=game.get("gameStatusText", ""),
-                    period=game.get("period", 0),
-                    date=date
-                ))
+            games = [
+                g for e in data.get("events", [])
+                if (g := _event_to_scoreboard(e)) is not None
+            ]
+            # El campo date del evento es la fecha real del partido; se
+            # sobreescribe con la fecha consultada para partidos sin ella.
+            for g in games:
+                g.date = g.date or date
 
             logger.info(f"✓ {len(games)} partidos encontrados para {date}")
             return games
@@ -136,152 +116,51 @@ class SportsDataClient:
             logger.error(f"❌ Error scoreboard: {str(e)}")
             return []
 
-    async def get_standings(self, season: str = "2024-25") -> List[TeamRecord]:
+    async def get_team_recent_games(
+        self,
+        team_id: str,
+        season: int,
+        limit: int = 10
+    ) -> List[Scoreboard]:
         """
-        Obtiene standings de la liga (Standings/League Standings).
-        
+        Últimos partidos jugados de un equipo en una temporada, incluso si
+        ya terminó — una sola petición trae el calendario completo, así
+        que no hace falta escanear día por día.
+
         Args:
-            season: Temporada (ej: "2024-25")
+            team_id: ID de equipo de ESPN (ver TEAM_NAME_TO_ID en
+                nba_api_client.py), no el nombre.
+            season: Año en que termina la temporada (ej. 2025 -> 2024-25).
+            limit: Cantidad de partidos a devolver.
         """
         try:
             data = await self._make_request(
-                "/nba-standings",
-                params={"season": season, "standingType": "league"}
+                f"/teams/{team_id}/schedule",
+                params={"season": season}
             )
 
-            records = []
-            for team in data.get("standings", {}).get("entries", []):
-                team_data = team.get("team", {})
-                stats = team.get("stats", [])
+            games = []
+            for event in data.get("events", []):
+                completions = event.get("competitions", [{}])
+                completed = completions[0].get("status", {}).get("type", {}).get("completed")
+                if not completed:
+                    continue
+                g = _event_to_scoreboard(event)
+                if g:
+                    games.append(g)
 
-                # Extraer wins/losses de la lista de stats
-                wins = next((s["value"] for s in stats if s.get("name") == "wins"), 0)
-                losses = next((s["value"] for s in stats if s.get("name") == "losses"), 0)
-                win_pct = next((s["value"] for s in stats if s.get("name") == "winPercent"), 0.0)
-
-                records.append(TeamRecord(
-                    team_id=str(team_data.get("id", "")),
-                    team_name=team_data.get("displayName", ""),
-                    wins=int(wins),
-                    losses=int(losses),
-                    win_pct=float(win_pct),
-                    conference=team.get("standingSummary", ""),
-                    division=""
-                ))
-
-            logger.info(f"✓ {len(records)} equipos en standings")
-            return records
+            games.sort(key=lambda g: g.date, reverse=True)
+            return games[:limit]
 
         except Exception as e:
-            logger.error(f"❌ Error standings: {str(e)}")
-            return []
-
-    async def get_player_status(self, team_id: str) -> List[PlayerStatus]:
-        """
-        Obtiene estado de jugadores de un equipo (Player/Status).
-        Útil para ver jugadores inactivos/lesionados.
-        
-        Args:
-            team_id: ID del equipo en la API
-        """
-        try:
-            data = await self._make_request("/nba-player-status", params={"teamId": team_id})
-
-            players = []
-            for player in data.get("playerStatus", {}).get("players", []):
-                players.append(PlayerStatus(
-                    player_id=str(player.get("id", "")),
-                    player_name=player.get("displayName", ""),
-                    team=player.get("teamName", ""),
-                    status=player.get("status", {}).get("type", {}).get("description", "Active"),
-                    position=player.get("position", {}).get("abbreviation", ""),
-                    jersey=player.get("jersey", "")
-                ))
-
-            return players
-
-        except Exception as e:
-            logger.error(f"❌ Error player status: {str(e)}")
-            return []
-
-    async def get_team_record(self, team_id: str) -> Optional[TeamRecord]:
-        """
-        Obtiene record de un equipo (Team/Record).
-        
-        Args:
-            team_id: ID del equipo
-        """
-        try:
-            data = await self._make_request("/nba-team-record", params={"teamId": team_id})
-
-            team = data.get("team", {})
-            record = team.get("record", {}).get("items", [{}])[0]
-            stats = record.get("stats", [])
-
-            wins = next((s["value"] for s in stats if s.get("name") == "wins"), 0)
-            losses = next((s["value"] for s in stats if s.get("name") == "losses"), 0)
-            win_pct = next((s["value"] for s in stats if s.get("name") == "winPercent"), 0.0)
-
-            return TeamRecord(
-                team_id=str(team.get("id", "")),
-                team_name=team.get("displayName", ""),
-                wins=int(wins),
-                losses=int(losses),
-                win_pct=float(win_pct),
-                conference="",
-                division=""
-            )
-
-        except Exception as e:
-            logger.error(f"❌ Error team record: {str(e)}")
-            return None
-
-    async def get_player_stats(self, player_id: str, season: str = "2024-25") -> Optional[Dict]:
-        """
-        Obtiene estadísticas de un jugador (Statistics/Player Stats).
-        
-        Args:
-            player_id: ID del jugador
-            season: Temporada
-        """
-        try:
-            data = await self._make_request(
-                "/nba-player-statistics",
-                params={"playerId": player_id, "season": season}
-            )
-            return data
-
-        except Exception as e:
-            logger.error(f"❌ Error player stats {player_id}: {str(e)}")
-            return None
-
-    async def get_schedule(self, date: Optional[str] = None) -> List[Dict]:
-        """
-        Obtiene calendario de partidos (Schedule/Get by Date).
-        
-        Args:
-            date: Fecha en formato YYYYMMDD
-        """
-        try:
-            if not date:
-                date = datetime.now().strftime("%Y%m%d")
-
-            data = await self._make_request("/nba-schedule", params={"gameDate": date})
-            return data.get("games", [])
-
-        except Exception as e:
-            logger.error(f"❌ Error schedule: {str(e)}")
+            logger.error(f"❌ Error obteniendo calendario del equipo {team_id}: {str(e)}")
             return []
 
     # ── Métodos de compatibilidad con api_manager.py ──────────────────────────
 
     async def get_player_injuries(self, season: int = 2024, team: Optional[str] = None) -> List:
-        """
-        Compatibilidad con api_manager. 
-        Esta API no tiene endpoint de injuries — retorna lista vacía.
-        Usa get_player_status() para ver jugadores inactivos.
-        """
-        logger.info("ℹ️ Esta API no tiene endpoint de injuries. Usa get_player_status().")
+        """Esta fuente no tiene endpoint de injuries — retorna lista vacía."""
+        logger.info("ℹ️ Esta fuente no tiene endpoint de injuries.")
         return []
 
     async def get_player_availability(self, team: str, season: int = 2024) -> List:
