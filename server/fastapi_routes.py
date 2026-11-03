@@ -3,40 +3,47 @@ FastAPI Routes - Endpoints mejorados con datos enriquecidos de lesiones.
 
 Integra:
   - NBA API para estadísticas
-  - RapidAPI SportsData para lesiones/disponibilidad
+  - ESPN (SportsDataClient) para lesiones vigentes (/injuries)
   - API Manager para orquestación y caché
 
 Endpoints:
   GET /api/v1/teams/{team}/stats - Stats enriquecidos de equipo
-  GET /api/v1/players/{player_id}/stats - Stats enriquecidos de jugador
   GET /api/v1/health-check - Estado de APIs
   GET /api/v1/compare/teams - Comparación de salud entre equipos
 """
 
-from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse
 from typing import List, Optional
 from datetime import datetime
 import logging
+
+from api.nba_api_client import TEAM_ABBREVIATIONS, resolve_team
+from api.sportsdata_api_client import current_season
 
 logger = logging.getLogger(__name__)
 
 # Crear router
 router = APIRouter(prefix="/api/v1", tags=["NBA Analytics"])
 
-# Estos serían inyectados por FastAPI
-# En main.py: router.app_state.api_manager = api_manager
-api_manager = None  # Se inicializa en main.py
 
-
-def get_api_manager():
-    """Dependency injection para acceder al API Manager"""
-    if api_manager is None:
+def get_api_manager(request: Request):
+    """Obtiene el APIManager guardado en app.state (lo crea server/main.py)."""
+    manager = getattr(request.app.state, "api_manager", None)
+    if manager is None:
         raise HTTPException(
             status_code=500,
             detail="API Manager no inicializado"
         )
-    return api_manager
+    return manager
+
+
+def _resolve_or_404(team: str) -> str:
+    """Devuelve la abreviatura ESPN del equipo o lanza 404."""
+    info = resolve_team(team)
+    if info is None:
+        raise HTTPException(status_code=404, detail=f"Equipo desconocido: {team}")
+    return info.abbr
 
 
 # ============================================================================
@@ -45,8 +52,9 @@ def get_api_manager():
 
 @router.get("/teams/{team}/stats", name="get_team_stats")
 async def get_team_stats(
-    team: str = Query(..., min_length=2, max_length=3, description="Código del equipo (ej: LAL)"),
-    season: int = Query(2025, ge=1996, le=2050, description="Temporada NBA"),
+    request: Request,
+    team: str = Path(..., min_length=2, max_length=30, description="Equipo: código ESPN (LAL), alias (GSW), nombre (Lakers) o id"),
+    season: int = Query(current_season(), ge=1996, le=2050, description="Temporada NBA"),
     use_cache: bool = Query(True, description="Usar caché si está disponible")
 ):
     """
@@ -59,10 +67,11 @@ async def get_team_stats(
     - Ausencias críticas
     - Win% ajustado por lesiones
     
-    Ejemplo: `GET /api/v1/teams/LAL/stats?season=2025`
+    Ejemplo: `GET /api/v1/teams/LAL/stats?season=2027`
     """
     try:
-        manager = get_api_manager()
+        manager = get_api_manager(request)
+        team = _resolve_or_404(team)
 
         # Si no quiere caché, limpiar para ese equipo
         if not use_cache:
@@ -92,7 +101,8 @@ async def get_team_stats(
                     "status": _get_health_status(stats.team_health_score),
                     "injured_players": stats.injured_players,
                     "unavailable_players": stats.unavailable_players,
-                    "critical_absences": stats.critical_absences
+                    "critical_absences": stats.critical_absences,
+                    "injury_data_available": stats.injury_data_available
                 },
                 "projections": {
                     "base_win_pct": round(stats.win_pct, 3),
@@ -103,6 +113,8 @@ async def get_team_stats(
             "message": f"Stats para {team} en temporada {season}"
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error fetching team stats: {str(e)}")
         raise HTTPException(
@@ -113,7 +125,8 @@ async def get_team_stats(
 
 @router.get("/teams", name="get_all_teams_stats")
 async def get_all_teams_stats(
-    season: int = Query(2025, ge=1996, le=2050),
+    request: Request,
+    season: int = Query(current_season(), ge=1996, le=2050),
     teams: Optional[List[str]] = Query(None, description="Lista de equipos a filtrar"),
     sort_by: str = Query("health_score", description="Ordenar por: health_score, wins, injured_players")
 ):
@@ -124,19 +137,16 @@ async def get_all_teams_stats(
     - teams: Lista de equipos (ej: ?teams=LAL&teams=BOS&teams=LAC)
     - sort_by: health_score | wins | injured_players
     
-    Ejemplo: `GET /api/v1/teams?season=2025&teams=LAL&teams=BOS&sort_by=health_score`
+    Ejemplo: `GET /api/v1/teams?season=2027&teams=LAL&teams=BOS&sort_by=health_score`
     """
     try:
-        manager = get_api_manager()
+        manager = get_api_manager(request)
 
         # Si no especifica equipos, obtener los 30 de la NBA
-        if not teams:
-            teams = [
-                "ATL", "BOS", "BKN", "CHA", "CHI", "CLE", "DAL", "DEN",
-                "DET", "GSW", "HOU", "LAC", "LAL", "MEM", "MIA", "MIL",
-                "MIN", "NOP", "NYK", "OKC", "ORL", "PHI", "PHX", "POR",
-                "SAC", "SAS", "TOR", "UTA", "WAS"
-            ]
+        if teams:
+            teams = list(dict.fromkeys(_resolve_or_404(t) for t in teams))
+        else:
+            teams = list(TEAM_ABBREVIATIONS)
 
         stats_dict = await manager.get_all_team_stats(teams, season)
 
@@ -173,12 +183,15 @@ async def get_all_teams_stats(
                     "win_pct": round(stats.win_pct, 3),
                     "health_score": round(stats.team_health_score, 3),
                     "injured_players": stats.injured_players,
+                    "injury_data_available": stats.injury_data_available,
                     "adjusted_win_pct": round(stats.projected_win_pct_adjusted, 3)
                 }
                 for team, stats in sorted_stats
             ]
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error fetching all teams stats: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -190,23 +203,26 @@ async def get_all_teams_stats(
 
 @router.get("/compare/teams", name="compare_teams")
 async def compare_teams(
-    team1: str = Query(..., min_length=2, max_length=3),
-    team2: str = Query(..., min_length=2, max_length=3),
-    season: int = Query(2025, ge=1996, le=2050)
+    request: Request,
+    team1: str = Query(..., min_length=2, max_length=30),
+    team2: str = Query(..., min_length=2, max_length=30),
+    season: int = Query(current_season(), ge=1996, le=2050)
 ):
     """
     Compara la salud de dos equipos.
     
-    Ejemplo: `GET /api/v1/compare/teams?team1=LAL&team2=BOS&season=2025`
+    Ejemplo: `GET /api/v1/compare/teams?team1=LAL&team2=BOS&season=2027`
     """
-    if team1.upper() == team2.upper():
+    team1 = _resolve_or_404(team1)
+    team2 = _resolve_or_404(team2)
+    if team1 == team2:
         raise HTTPException(
             status_code=400,
             detail="Los equipos deben ser diferentes"
         )
 
     try:
-        manager = get_api_manager()
+        manager = get_api_manager(request)
         comparison = await manager.compare_teams_health(team1, team2, season)
 
         if not comparison:
@@ -228,6 +244,8 @@ async def compare_teams(
             }
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error comparing teams: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -238,17 +256,17 @@ async def compare_teams(
 # ============================================================================
 
 @router.get("/health-check", name="health_check")
-async def health_check():
+async def health_check(request: Request):
     """
     Verifica el estado de todas las APIs integradas.
     
     Retorna:
-    - Estado de NBA API
-    - Estado de RapidAPI SportsData
+    - Estado de NBA API (ESPN standings)
+    - Estado de SportsData (ESPN scoreboard)
     - Estadísticas de caché
     """
     try:
-        manager = get_api_manager()
+        manager = get_api_manager(request)
         cache_stats = manager.get_cache_stats()
 
         return {
@@ -257,26 +275,30 @@ async def health_check():
             "services": {
                 "nba_api": {
                     "status": "connected",
-                    "description": "NBA Stats API"
+                    "description": "ESPN standings"
                 },
                 "sportsdata": {
                     "status": "connected",
-                    "description": "RapidAPI SportsData"
+                    "description": "ESPN scoreboard/schedule"
                 }
             },
             "cache": cache_stats
         }
 
     except Exception as e:
-        return {
-            "status": "unhealthy",
-            "error": str(e),
-            "timestamp": datetime.now().isoformat()
-        }, 503
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "error": str(getattr(e, "detail", e)),
+                "timestamp": datetime.now().isoformat()
+            }
+        )
 
 
 @router.post("/cache/clear", name="clear_cache")
 async def clear_cache(
+    request: Request,
     pattern: Optional[str] = Query(None, description="Patrón de claves a limpiar")
 ):
     """
@@ -288,7 +310,7 @@ async def clear_cache(
     Ejemplo: `POST /api/v1/cache/clear?pattern=LAL:*`
     """
     try:
-        manager = get_api_manager()
+        manager = get_api_manager(request)
         manager.clear_cache(pattern=pattern)
 
         return {
@@ -297,6 +319,8 @@ async def clear_cache(
             "timestamp": datetime.now().isoformat()
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -306,12 +330,12 @@ async def clear_cache(
 # ============================================================================
 
 @router.get("/status/cache", name="cache_status")
-async def cache_status():
+async def cache_status(request: Request):
     """
     Retorna estadísticas detalladas del caché.
     """
     try:
-        manager = get_api_manager()
+        manager = get_api_manager(request)
         stats = manager.get_cache_stats()
 
         return {
@@ -320,6 +344,8 @@ async def cache_status():
             "cache": stats
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -338,47 +364,3 @@ def _get_health_status(score: float) -> str:
         return "Regular 🟠"
     else:
         return "Crítico 🔴"
-
-
-# ============================================================================
-# EJEMPLO DE INTEGRACIÓN EN MAIN.PY
-# ============================================================================
-
-"""
-# En tu main.py:
-
-from fastapi import FastAPI
-from api_manager import APIManager
-from sportsdata_api_client import SportsDataClient
-from nba_api_client import NBAClient  # Tu cliente actual
-from routes import router
-
-app = FastAPI(title="NBA Predictor API")
-
-@app.on_event("startup")
-async def startup():
-    # Inicializar clientes
-    nba_client = NBAClient()
-    sportsdata_client = SportsDataClient(api_key="tu_key")
-    
-    # Crear API Manager
-    api_manager = APIManager(
-        nba_client=nba_client,
-        sportsdata_client=sportsdata_client,
-        cache_ttl=3600
-    )
-    
-    # Hacerlo disponible en toda la app
-    app.state.api_manager = api_manager
-    
-    # Inyectar en router
-    global api_manager as global_api_manager
-    global_api_manager = api_manager
-
-# Incluir router
-app.include_router(router)
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-"""

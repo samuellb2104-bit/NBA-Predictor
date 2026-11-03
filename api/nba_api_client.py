@@ -9,6 +9,7 @@ RapidAPI "NBA Free Data" por debajo.
 import asyncio
 import logging
 import httpx
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -20,9 +21,76 @@ TEAM_NAME_TO_ID = {
     "Cavaliers": "5", "Hawks": "1", "Hornets": "3", "Pistons": "8",
     "Pacers": "11", "Magic": "19", "Wizards": "27", "Raptors": "28",
     "Mavericks": "6", "Rockets": "10", "Grizzlies": "29", "Pelicans": "16",
-    "Spurs": "22", "Thunder": "33", "Trail Blazers": "23", "Jazz": "26",
+    "Spurs": "22", "Thunder": "25", "Trail Blazers": "23", "Jazz": "26",
     "Kings": "24", "Timberwolves": "30",
 }
+
+# Nombre -> abreviatura de ESPN (la que devuelve el endpoint de standings).
+TEAM_NAME_TO_ABBR = {
+    "Hawks": "ATL", "Celtics": "BOS", "Nets": "BKN", "Hornets": "CHA",
+    "Bulls": "CHI", "Cavaliers": "CLE", "Mavericks": "DAL", "Nuggets": "DEN",
+    "Pistons": "DET", "Warriors": "GS", "Rockets": "HOU", "Pacers": "IND",
+    "Clippers": "LAC", "Lakers": "LAL", "Grizzlies": "MEM", "Heat": "MIA",
+    "Bucks": "MIL", "Timberwolves": "MIN", "Pelicans": "NO", "Knicks": "NY",
+    "Thunder": "OKC", "Magic": "ORL", "76ers": "PHI", "Suns": "PHX",
+    "Trail Blazers": "POR", "Spurs": "SA", "Kings": "SAC", "Raptors": "TOR",
+    "Jazz": "UTAH", "Wizards": "WSH",
+}
+
+# Abreviaturas ESPN en orden alfabético: fuente única para la lista de 30 equipos.
+TEAM_ABBREVIATIONS = sorted(TEAM_NAME_TO_ABBR.values())
+
+# Alias comunes (otras convenciones de abreviatura) -> abreviatura ESPN.
+TEAM_ALIASES = {
+    "GSW": "GS", "NOP": "NO", "NYK": "NY", "SAS": "SA", "UTA": "UTAH",
+    "WAS": "WSH", "PHO": "PHX", "BRK": "BKN", "CHO": "CHA",
+    "SIXERS": "PHI", "BLAZERS": "POR",
+}
+
+
+@dataclass(frozen=True)
+class TeamInfo:
+    name: str    # "Lakers"
+    abbr: str    # abreviatura ESPN, "LAL"
+    id: str      # id de ESPN, "13"
+
+
+def _norm(value: str) -> str:
+    return " ".join(str(value).strip().lower().split())
+
+
+_TEAMS: List[TeamInfo] = [
+    TeamInfo(name, TEAM_NAME_TO_ABBR[name], tid)
+    for name, tid in TEAM_NAME_TO_ID.items()
+]
+_TEAM_LOOKUP: Dict[str, TeamInfo] = {}
+for _t in _TEAMS:
+    _TEAM_LOOKUP[_norm(_t.name)] = _t
+    _TEAM_LOOKUP[_norm(_t.abbr)] = _t
+    _TEAM_LOOKUP[_norm(_t.id)] = _t
+for _alias, _abbr in TEAM_ALIASES.items():
+    _TEAM_LOOKUP[_norm(_alias)] = _TEAM_LOOKUP[_norm(_abbr)]
+
+
+def resolve_team(team) -> Optional[TeamInfo]:
+    """
+    Resuelve un equipo a TeamInfo desde nombre ("Lakers"), nombre completo
+    ("Los Angeles Lakers"), abreviatura ESPN ("LAL", "GS"), alias ("GSW")
+    o id ("13"). Sin distinguir mayúsculas. Devuelve None si no existe.
+    """
+    if team is None:
+        return None
+    key = _norm(team)
+    if not key:
+        return None
+    if key in _TEAM_LOOKUP:
+        return _TEAM_LOOKUP[key]
+    # Nombre completo: "Los Angeles Lakers" termina con el nombre del equipo.
+    for t in _TEAMS:
+        if key.endswith(" " + _norm(t.name)):
+            return t
+    return None
+
 
 STANDINGS_URL = "https://site.api.espn.com/apis/v2/sports/basketball/nba/standings"
 
@@ -32,7 +100,7 @@ class NBAApiClient:
 
     def __init__(self, season: str = "2024-25"):
         self.season = season
-        self._standings_cache: Optional[List[Dict]] = None
+        self._standings_cache: Dict[int, List[Dict]] = {}
         logger.info(f"✓ NBAApiClient inicializado (season: {season})")
 
     def _run(self, coro):
@@ -91,7 +159,7 @@ class NBAApiClient:
                     })
 
             # Guardar en caché para get_team_stats
-            self._standings_cache = result
+            self._standings_cache[season] = result
             logger.info(f"✓ Standings: {len(result)} equipos")
             return result
 
@@ -102,16 +170,21 @@ class NBAApiClient:
     def get_team_stats(self, team: str, season: int = 2024) -> Optional[Dict]:
         """Obtiene stats del equipo desde standings."""
         # Cargar standings si no están en caché
-        if not self._standings_cache:
+        if not self._standings_cache.get(season):
             self.get_standings(season)
 
-        if not self._standings_cache:
+        standings = self._standings_cache.get(season)
+        if not standings:
             return None
 
-        team_id = TEAM_NAME_TO_ID.get(team)
+        info = resolve_team(team)
+        if info is None:
+            logger.warning(f"⚠️ Equipo desconocido: {team}")
+            return None
+
         entry = next(
-            (e for e in self._standings_cache
-             if e.get("team_id") == team_id or team.lower() in e.get("team", "").lower()),
+            (e for e in standings
+             if e.get("team_id") == info.id or e.get("abbreviation") == info.abbr),
             None
         )
 

@@ -12,8 +12,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from api.nba_api_client import NBAApiClient, TEAM_NAME_TO_ID
-from api.sportsdata_api_client import Scoreboard, SportsDataClient
-from api.api_manager import APIManager, CachedData, DataSource, EnrichedTeamStats
+from api.sportsdata_api_client import (
+    PlayerAvailability, Scoreboard, SportsDataClient, current_season, parse_injuries,
+)
+from api.api_manager import (
+    ROTATION_SIZE, APIManager, CachedData, DataSource, EnrichedTeamStats,
+)
 
 
 # ============================================================================
@@ -154,15 +158,93 @@ class TestSportsDataClient:
         assert await client.get_scoreboard(date="20250201") == []
 
     @pytest.mark.asyncio
-    async def test_get_player_injuries_is_a_stub(self):
-        """This data source has no injuries endpoint — always returns []."""
+    async def test_get_injuries_parses_real_shape(self):
         client = SportsDataClient()
-        assert await client.get_player_injuries(season=2025) == []
+        client._make_request = AsyncMock(return_value=INJURIES_RESPONSE)
+
+        players = await client.get_injuries()
+
+        assert len(players) == 4
+        johnson = players[0]
+        assert johnson.player_name == "Jalen Johnson"
+        assert johnson.team_id == "1"
+        assert johnson.status == "Out"
+        assert johnson.available is False
+        assert johnson.impact_on_team == 1.0
+        assert "ruled out" in johnson.short_comment
+        assert johnson.date == "2026-11-02T22:58Z"
+
+    def test_parse_injuries_status_weights(self):
+        by_name = {p.player_name: p for p in parse_injuries(INJURIES_RESPONSE)}
+        assert by_name["Day Tripper"].available is True
+        assert by_name["Day Tripper"].impact_on_team == 0.5
+        assert by_name["Sus Pended"].available is False
+        assert by_name["Sus Pended"].impact_on_team == 1.0
+
+    def test_parse_injuries_empty_payload(self):
+        assert parse_injuries({}) == []
 
     @pytest.mark.asyncio
-    async def test_get_player_availability_is_a_stub(self):
+    async def test_get_injuries_is_cached(self):
         client = SportsDataClient()
-        assert await client.get_player_availability(team="LAL") == []
+        client._make_request = AsyncMock(return_value=INJURIES_RESPONSE)
+
+        await client.get_injuries()
+        await client.get_injuries()
+
+        assert client._make_request.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_get_injuries_refetches_after_ttl(self):
+        client = SportsDataClient()
+        client._make_request = AsyncMock(return_value=INJURIES_RESPONSE)
+
+        await client.get_injuries()
+        ts, players = client._injuries_cache
+        client._injuries_cache = (ts - client.INJURIES_TTL - 1, players)
+        await client.get_injuries()
+
+        assert client._make_request.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_get_injuries_propagates_request_failure(self):
+        client = SportsDataClient()
+        client._make_request = AsyncMock(side_effect=Exception("boom"))
+
+        with pytest.raises(Exception):
+            await client.get_injuries()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("identifier", ["LAL", "lal", "Lakers", "Los Angeles Lakers", "13"])
+    async def test_get_player_availability_filters_team_by_any_identifier(self, identifier):
+        client = SportsDataClient()
+        client._make_request = AsyncMock(return_value=INJURIES_RESPONSE)
+
+        players = await client.get_player_availability(identifier, current_season())
+
+        assert [p.player_name for p in players] == ["Anthony Davis", "Day Tripper"]
+        assert all(p.team_id == "13" for p in players)
+
+    @pytest.mark.asyncio
+    async def test_get_player_availability_unknown_or_healthy_team(self):
+        client = SportsDataClient()
+        client._make_request = AsyncMock(return_value=INJURIES_RESPONSE)
+
+        assert await client.get_player_availability("XXX", current_season()) == []
+        assert await client.get_player_availability("BOS", current_season()) == []
+
+    @pytest.mark.asyncio
+    async def test_get_player_availability_past_season_returns_empty_without_fetch(self):
+        client = SportsDataClient()
+        client._make_request = AsyncMock(return_value=INJURIES_RESPONSE)
+
+        assert await client.get_player_availability("LAL", current_season() - 1) == []
+        client._make_request.assert_not_called()
+
+    def test_current_season_rolls_over_in_october(self):
+        assert current_season(datetime(2026, 9, 30)) == 2026
+        assert current_season(datetime(2026, 10, 1)) == 2027
+        assert current_season(datetime(2027, 1, 15)) == 2027
 
     @pytest.mark.asyncio
     async def test_get_team_recent_games_returns_only_completed_games_sorted_desc(self):
@@ -202,6 +284,35 @@ class TestSportsDataClient:
         assert await client.get_team_recent_games(team_id="13", season=2025) == []
 
 
+def _injury(id_, name, status, comment="comment"):
+    first, _, last = name.partition(" ")
+    return {
+        "id": id_, "status": status, "date": "2026-11-02T22:58Z",
+        "shortComment": comment, "longComment": "long",
+        "athlete": {"firstName": first, "lastName": last, "displayName": name,
+                    "shortName": f"{first[0]}. {last}", "links": []},
+    }
+
+
+# Forma real de GET /injuries, recortada (ids de equipo ESPN: ATL=1, LAL=13).
+INJURIES_RESPONSE = {
+    "timestamp": "2026-11-03T03:32:38Z",
+    "status": "success",
+    "season": {"year": 2027, "type": 2, "name": "Regular Season", "displayName": "2026-27"},
+    "injuries": [
+        {"id": "1", "displayName": "Atlanta Hawks", "injuries": [
+            _injury("537236", "Jalen Johnson", "Out",
+                    "Johnson (ankle) has been ruled out for Monday's game versus Indiana."),
+            _injury("2", "Sus Pended", "Suspension"),
+        ]},
+        {"id": "13", "displayName": "Los Angeles Lakers", "injuries": [
+            _injury("3", "Anthony Davis", "Out"),
+            _injury("4", "Day Tripper", "Day-To-Day"),
+        ]},
+    ],
+}
+
+
 # ============================================================================
 # TESTS PARA API MANAGER
 # ============================================================================
@@ -216,15 +327,6 @@ class TestAPIManager:
             "losses": 20,
             "win_pct": 0.692,
         })
-        client.get_player_stats = MagicMock(return_value={
-            "name": "LeBron James",
-            "team": "LAL",
-            "points": 25.5,
-            "assists": 8.3,
-            "rebounds": 7.1,
-            "fg_pct": 0.52,
-            "games_played": 56,
-        })
         return client
 
     @pytest.fixture
@@ -232,6 +334,10 @@ class TestAPIManager:
         client = MagicMock()
         client.get_player_availability = AsyncMock(return_value=[])
         return client
+
+    @pytest.fixture(autouse=True)
+    def season_2025_is_current(self, monkeypatch):
+        monkeypatch.setattr("api.api_manager.is_current_season", lambda season: season == 2025)
 
     @pytest.fixture
     def api_manager(self, mock_nba_client, mock_sportsdata_client):
@@ -284,32 +390,69 @@ class TestAPIManager:
     @pytest.mark.asyncio
     async def test_get_enriched_team_stats_with_injured_players(self, api_manager, mock_sportsdata_client):
         mock_sportsdata_client.get_player_availability = AsyncMock(return_value=[
-            SimpleNamespace(player_name="LeBron James", available=False, impact_on_team=0.8),
-            SimpleNamespace(player_name="Anthony Davis", available=True, impact_on_team=0.0),
+            PlayerAvailability("LeBron James", "13", "Out", False, 1.0, "", ""),
+            PlayerAvailability("Anthony Davis", "13", "Day-To-Day", True, 0.5, "", ""),
         ])
 
         stats = await api_manager.get_enriched_team_stats("LAL", 2025)
 
-        assert stats.injured_players == 1
-        assert stats.unavailable_players == 1
-        assert stats.critical_absences == ["LeBron James"]
-        assert 0.0 <= stats.team_health_score < 1.0
+        assert stats.injured_players == 2
+        assert stats.unavailable_players == 1  # solo el Out
+        assert stats.team_health_score == pytest.approx(1 - 1.5 / ROTATION_SIZE)
+        assert stats.injury_data_available is True
+        # Requiere datos de importancia por jugador; no se inventa.
+        assert stats.critical_absences == []
+
+    @pytest.mark.asyncio
+    async def test_one_out_player_does_not_zero_the_health_score(self, api_manager, mock_sportsdata_client):
+        mock_sportsdata_client.get_player_availability = AsyncMock(return_value=[
+            PlayerAvailability("LeBron James", "13", "Out", False, 1.0, "", ""),
+        ])
+
+        stats = await api_manager.get_enriched_team_stats("LAL", 2025)
+
+        assert stats.team_health_score == pytest.approx(0.9)
+        assert stats.team_health_score > 0.0
+
+    @pytest.mark.asyncio
+    async def test_health_score_is_floored_at_zero(self, api_manager, mock_sportsdata_client):
+        mock_sportsdata_client.get_player_availability = AsyncMock(return_value=[
+            PlayerAvailability(f"P{i}", "13", "Out", False, 1.0, "", "")
+            for i in range(ROTATION_SIZE + 3)
+        ])
+
+        stats = await api_manager.get_enriched_team_stats("LAL", 2025)
+
+        assert stats.team_health_score == 0.0
+
+    @pytest.mark.asyncio
+    async def test_non_current_season_has_no_injury_data(self, api_manager, mock_sportsdata_client):
+        stats = await api_manager.get_enriched_team_stats("LAL", 2024)
+
+        assert stats.injury_data_available is False
+        mock_sportsdata_client.get_player_availability.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_injury_fetch_failure_marks_data_unavailable(self, api_manager, mock_sportsdata_client):
+        mock_sportsdata_client.get_player_availability = AsyncMock(side_effect=Exception("boom"))
+
+        stats = await api_manager.get_enriched_team_stats("LAL", 2025)
+
+        assert stats is not None
+        assert stats.injury_data_available is False
+        assert stats.team_health_score == 1.0
+
+    @pytest.mark.asyncio
+    async def test_compare_teams_health_includes_injury_data_flag(self, api_manager):
+        result = await api_manager.compare_teams_health("LAL", "BOS", 2025)
+
+        assert result["LAL"]["injury_data_available"] is True
+        assert result["BOS"]["injury_data_available"] is True
 
     @pytest.mark.asyncio
     async def test_get_enriched_team_stats_missing_team_returns_none(self, api_manager, mock_nba_client):
         mock_nba_client.get_team_stats = MagicMock(return_value=None)
         assert await api_manager.get_enriched_team_stats("XXX", 2025) is None
-
-    @pytest.mark.asyncio
-    async def test_get_enriched_player_stats_without_injury_data(self, api_manager):
-        """No injury endpoint is available from this data source — impact stays at 0."""
-        stats = await api_manager.get_enriched_player_stats(player_id=2544, season=2025)
-
-        assert stats is not None
-        assert stats.player_name == "LeBron James"
-        assert stats.is_injured is False
-        assert stats.injury_status == "Unknown"
-        assert stats.adjusted_impact == pytest.approx(25.5 + 8.3)
 
     @pytest.mark.asyncio
     async def test_get_all_team_stats(self, api_manager):

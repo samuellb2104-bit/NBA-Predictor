@@ -2,13 +2,13 @@
 API Manager - Orquestador centralizado para múltiples fuentes de datos NBA.
 
 Maneja:
-  - Sincronización entre NBA API y RapidAPI SportsData
+  - Sincronización entre ESPN standings (NBA API) y ESPN scoreboard/lesiones
   - Caché inteligente con expiración
   - Retry automático y circuit breaker
   - Composición de datos de múltiples fuentes
 
 Uso:
-    manager = APIManager(nba_api_client, sportsdata_client, cache_ttl=3600)
+    manager = APIManager(nba_client, sportsdata_client, cache_ttl=3600)
     enriched_stats = await manager.get_enriched_team_stats("LAL")
 """
 
@@ -18,9 +18,16 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
-import json
+
+from api.sportsdata_api_client import is_current_season
 
 logger = logging.getLogger(__name__)
+
+# Tamaño de la rotación NBA usada para normalizar el impacto de lesiones:
+# team_health_score = max(0, 1 - sum(pesos) / ROTATION_SIZE). Un jugador
+# Out (peso 1.0) resta 0.1; ESPN no da importancia por jugador, así que
+# todos cuentan igual.
+ROTATION_SIZE = 10
 
 
 class DataSource(Enum):
@@ -44,27 +51,6 @@ class CachedData:
 
 
 @dataclass
-class EnrichedPlayerStats:
-    """Estadísticas de jugador enriquecidas con datos de lesiones"""
-    player_id: int
-    player_name: str
-    team: str
-    # Stats básicos
-    games_played: int
-    points: float
-    assists: float
-    rebounds: float
-    fg_pct: float
-    # Datos de lesión
-    is_injured: bool
-    injury_status: str
-    injury_impact: float  # 0.0 a 1.0
-    return_date: Optional[str]
-    # Cálculos
-    adjusted_impact: float  # Impacto ajustado por lesión
-
-
-@dataclass
 class EnrichedTeamStats:
     """Estadísticas de equipo enriquecidas"""
     team: str
@@ -80,6 +66,9 @@ class EnrichedTeamStats:
     # Análisis
     projected_win_pct_adjusted: float
     critical_absences: List[str] = field(default_factory=list)
+    # False si la temporada no es la actual (ESPN solo da lesiones vigentes)
+    # o falló la consulta: distingue "sin lesiones" de "sin datos".
+    injury_data_available: bool = True
 
 
 class APIManager:
@@ -87,8 +76,8 @@ class APIManager:
 
     def __init__(
         self,
-        nba_client,  # Cliente de nba_api
-        sportsdata_client,  # Cliente de RapidAPI SportsData
+        nba_client,  # NBAApiClient (ESPN standings)
+        sportsdata_client,  # SportsDataClient (ESPN scoreboard/lesiones)
         cache_ttl: int = 3600,  # TTL default en segundos (1 hora)
         use_cache: bool = True
     ):
@@ -162,74 +151,6 @@ class APIManager:
             self.cache.clear()
             logger.info("🧹 Caché completamente limpiado")
 
-    async def get_enriched_player_stats(
-        self,
-        player_id: int,
-        season: int = 2025
-    ) -> Optional[EnrichedPlayerStats]:
-        """
-        Obtiene estadísticas de jugador enriquecidas con estado de lesión.
-        
-        Args:
-            player_id: ID del jugador
-            season: Temporada
-            
-        Returns:
-            EnrichedPlayerStats o None
-        """
-        cache_key = self._cache_key("player", player_id, season)
-        cached = self._get_from_cache(cache_key)
-        if cached:
-            return cached
-
-        try:
-            # Obtener stats del jugador (NBA API)
-            player_stats = await asyncio.to_thread(
-                self.nba_client.get_player_stats,
-                player_id,
-                season
-            )
-
-            if not player_stats:
-                logger.warning(f"⚠️ No stats encontrados para jugador {player_id}")
-                return None
-
-            # El API de RapidAPI SportsData en uso no expone datos de lesión
-            # por jugador (sin endpoint de injuries/status confiable) — se deja
-            # sin ajustar hasta que exista una fuente de datos real.
-            is_injured = False
-            injury_status = "Unknown"
-            injury_impact = 0.0
-            return_date = None
-
-            # Calcular impacto ajustado
-            # Si el jugador está lesionado, su impacto en el análisis se reduce
-            player_impact = player_stats.get("points", 0) + player_stats.get("assists", 0)
-            adjusted_impact = player_impact * (1 - injury_impact)
-
-            enriched = EnrichedPlayerStats(
-                player_id=player_id,
-                player_name=player_stats.get("name", "Unknown"),
-                team=player_stats.get("team", "Unknown"),
-                games_played=player_stats.get("games_played", 0),
-                points=player_stats.get("points", 0.0),
-                assists=player_stats.get("assists", 0.0),
-                rebounds=player_stats.get("rebounds", 0.0),
-                fg_pct=player_stats.get("fg_pct", 0.0),
-                is_injured=is_injured,
-                injury_status=injury_status,
-                injury_impact=injury_impact,
-                return_date=return_date,
-                adjusted_impact=adjusted_impact
-            )
-
-            self._set_cache(cache_key, enriched, DataSource.SPORTSDATA)
-            return enriched
-
-        except Exception as e:
-            logger.error(f"❌ Error enriqueciendo stats de jugador {player_id}: {str(e)}")
-            return None
-
     async def get_enriched_team_stats(
         self,
         team: str,
@@ -262,31 +183,30 @@ class APIManager:
                 logger.warning(f"⚠️ No stats encontrados para equipo {team}")
                 return None
 
-            # Obtener disponibilidad de jugadores (RapidAPI SportsData)
-            player_availability = await self.sportsdata_client.get_player_availability(
-                team=team,
-                season=season
-            )
+            # Lesiones: ESPN solo publica el reporte vigente, no histórico.
+            player_availability = []
+            injury_data_available = False
+            if is_current_season(season):
+                try:
+                    player_availability = await self.sportsdata_client.get_player_availability(
+                        team=team,
+                        season=season
+                    )
+                    injury_data_available = True
+                except Exception as e:
+                    logger.warning(f"⚠️ Sin datos de lesiones para {team}: {e}")
 
-            # Calcular métricas de salud del equipo
-            injured_count = sum(1 for p in player_availability if not p.available)
-            unavailable_count = sum(
-                1 for p in player_availability
-                if not p.available and p.impact_on_team > 0.3  # Impacto significativo
-            )
+            injured_count = len(player_availability)
+            # No disponibles = Out/Suspension (los Day-To-Day cuentan como
+            # lesionados pero siguen disponibles).
+            unavailable_count = sum(1 for p in player_availability if not p.available)
 
-            # Calcular salud del equipo (0.0 = muy lesionado, 1.0 = perfecto)
-            if player_availability:
-                total_impact = sum(p.impact_on_team for p in player_availability if not p.available)
-                team_health_score = max(0.0, 1.0 - (total_impact / len(player_availability)))
-            else:
-                team_health_score = 1.0
+            total_impact = sum(p.impact_on_team for p in player_availability)
+            team_health_score = max(0.0, 1.0 - total_impact / ROTATION_SIZE)
 
-            # Identificar ausencias críticas
-            critical_absences = [
-                p.player_name for p in player_availability
-                if not p.available and p.impact_on_team > 0.5
-            ]
+            # TODO: requiere datos de importancia por jugador (minutos/usage),
+            # que ESPN /injuries no entrega; no se inventa.
+            critical_absences: List[str] = []
 
             # Ajustar win_pct por lesiones
             base_win_pct = team_stats.get("win_pct", 0.5)
@@ -302,7 +222,8 @@ class APIManager:
                 unavailable_players=unavailable_count,
                 team_health_score=team_health_score,
                 projected_win_pct_adjusted=projected_win_pct_adjusted,
-                critical_absences=critical_absences
+                critical_absences=critical_absences,
+                injury_data_available=injury_data_available
             )
 
             self._set_cache(cache_key, enriched, DataSource.SPORTSDATA)
@@ -376,13 +297,15 @@ class APIManager:
                 "health_score": stats1.team_health_score,
                 "injured_players": stats1.injured_players,
                 "critical_absences": stats1.critical_absences,
-                "adjusted_win_pct": stats1.projected_win_pct_adjusted
+                "adjusted_win_pct": stats1.projected_win_pct_adjusted,
+                "injury_data_available": stats1.injury_data_available
             },
             team2: {
                 "health_score": stats2.team_health_score,
                 "injured_players": stats2.injured_players,
                 "critical_absences": stats2.critical_absences,
-                "adjusted_win_pct": stats2.projected_win_pct_adjusted
+                "adjusted_win_pct": stats2.projected_win_pct_adjusted,
+                "injury_data_available": stats2.injury_data_available
             },
             "health_advantage": team1 if stats1.team_health_score > stats2.team_health_score else team2
         }
@@ -399,45 +322,3 @@ class APIManager:
                 for s in DataSource
             }
         }
-
-
-# ============================================================================
-# EJEMPLO DE USO
-# ============================================================================
-
-async def example_usage():
-    """Ejemplo de cómo usar el API Manager"""
-    from sportsdata_api_client import SportsDataClient
-
-    # Inicializar clientes (simulados aquí)
-    class MockNBAClient:
-        async def get_player_stats(self, player_id, season):
-            return {
-                "name": "LeBron James",
-                "team": "LAL",
-                "points": 25.5,
-                "assists": 8.3,
-                "rebounds": 7.1,
-                "fg_pct": 0.52,
-                "games_played": 56
-            }
-
-        async def get_team_stats(self, team, season):
-            return {
-                "team": team,
-                "wins": 45,
-                "losses": 20,
-                "win_pct": 0.692
-            }
-
-    nba_client = MockNBAClient()
-    # sportsdata_client = SportsDataClient(api_key="tu_key")
-
-    # manager = APIManager(nba_client, sportsdata_client)
-    # enriched = await manager.get_enriched_team_stats("LAL")
-    # print(f"Team Health Score: {enriched.team_health_score}")
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    # asyncio.run(example_usage())
