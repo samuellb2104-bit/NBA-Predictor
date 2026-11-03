@@ -261,8 +261,8 @@ async def health_check(request: Request):
     Verifica el estado de todas las APIs integradas.
     
     Retorna:
-    - Estado de NBA API (ESPN standings)
-    - Estado de SportsData (ESPN scoreboard)
+    - Estado del cliente de standings (ESPN)
+    - Estado del cliente de scoreboard/lesiones (ESPN)
     - Estadísticas de caché
     """
     try:

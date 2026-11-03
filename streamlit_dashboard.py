@@ -208,7 +208,7 @@ with tab2:
     date_input = st.date_input("Fecha", default_date, key=f"scoreboard_date_{season}")
     date_str = date_input.strftime("%Y%m%d")
 
-    with st.spinner("Consultando RapidAPI..."):
+    with st.spinner("Consultando ESPN..."):
         games_today = get_scoreboard(date_str)
 
     if games_today:

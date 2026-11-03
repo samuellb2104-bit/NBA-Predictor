@@ -31,9 +31,9 @@ ROTATION_SIZE = 10
 
 
 class DataSource(Enum):
-    """Fuentes de datos disponibles"""
-    NBA_API = "nba_api"
-    SPORTSDATA = "sportsdata"
+    """Fuentes de datos disponibles (ambas son endpoints públicos de ESPN)"""
+    NBA_API = "nba_api"  # standings / stats de equipo
+    SPORTSDATA = "sportsdata"  # scoreboard / calendario / lesiones
     CACHE = "cache"
 
 
@@ -85,8 +85,8 @@ class APIManager:
         Inicializa el API Manager.
         
         Args:
-            nba_client: Cliente inicializado de nba_api
-            sportsdata_client: Cliente inicializado de SportsDataClient
+            nba_client: NBAApiClient (standings / stats de equipo, ESPN)
+            sportsdata_client: SportsDataClient (scoreboard / lesiones, ESPN)
             cache_ttl: Tiempo de vida del caché en segundos
             use_cache: Habilitar/deshabilitar caché
         """

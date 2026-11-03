@@ -2,8 +2,7 @@
 NBA API Client - Datos públicos de ESPN (site.api.espn.com).
 
 No es una API oficial documentada, pero es de acceso libre (sin API key,
-sin cuota) y es la misma fuente que usan servicios de terceros como
-RapidAPI "NBA Free Data" por debajo.
+sin cuota).
 """
 
 import asyncio
@@ -205,11 +204,3 @@ class NBAApiClient:
             "fg3_pct": 0.0,
             "ft_pct": 0.0,
         }
-
-    def get_recent_games(self, team: str, season: int = 2024, limit: int = 10) -> List[Dict]:
-        """No disponible aquí — ver SportsDataClient.get_team_recent_games."""
-        logger.info(f"ℹ️ get_recent_games no disponible para {team}")
-        return []
-
-    def get_all_teams(self) -> List[Dict]:
-        return [{"name": k, "id": v} for k, v in TEAM_NAME_TO_ID.items()]

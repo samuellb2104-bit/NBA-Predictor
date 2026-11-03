@@ -117,16 +117,6 @@ class TestNBAApiClient:
 
         assert client.get_team_stats("Not A Team", season=2024) is None
 
-    def test_get_all_teams_returns_known_teams(self):
-        client = NBAApiClient()
-        teams = client.get_all_teams()
-
-        assert len(teams) == len(TEAM_NAME_TO_ID)
-        assert {"name": "Lakers", "id": "13"} in teams
-
-    def test_get_recent_games_not_supported(self):
-        client = NBAApiClient()
-        assert client.get_recent_games("Lakers", season=2024) == []
 
 
 # ============================================================================

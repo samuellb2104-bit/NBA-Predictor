@@ -1,10 +1,10 @@
 # NBA-Predictor
 
-An NBA analytics platform that aggregates real statistics and player
-injury/availability data from multiple sports APIs, exposes them through a
-resilient async **FastAPI** backend, and visualizes them in an interactive
-**Streamlit + Plotly** dashboard — including **Monte Carlo** simulations for
-game predictions.
+An NBA analytics platform that aggregates team statistics, schedules and
+current injury reports from ESPN's public API, exposes them through an async
+**FastAPI** backend, and visualizes them in an interactive **Streamlit +
+Plotly** dashboard. **Monte Carlo** game simulations are planned (see
+*Project status*).
 
 ## Purpose
 
@@ -15,7 +15,7 @@ The goal of the project is to turn raw NBA data into actionable insight:
 - **Orchestrate** multiple data sources behind a single API layer with
   intelligent caching, automatic retries, and circuit-breaker resilience.
 - **Analyze** matchups through statistical calculations and **Monte Carlo**
-  simulations to estimate game outcomes.
+  simulations to estimate game outcomes *(planned)*.
 - **Visualize** everything in a clean, interactive web dashboard so results are
   easy to explore.
 
@@ -50,10 +50,15 @@ NBA-predictor/
 
 | Method | Endpoint | Description |
 | ------ | -------- | ----------- |
-| `GET`  | `/api/v1/teams/{team}/stats`         | Enriched team statistics |
-| `GET`  | `/api/v1/players/{player_id}/stats`  | Enriched player statistics |
+| `GET`  | `/api/v1/teams/{team}/stats`         | Team record plus injury-based health score |
+| `GET`  | `/api/v1/teams`                      | All (or selected) teams, sortable |
+| `GET`  | `/api/v1/compare/teams`              | Health/availability comparison between two teams |
 | `GET`  | `/api/v1/health-check`               | Status of the connected APIs |
-| `GET`  | `/api/v1/compare/teams`              | Health/availability comparison between teams |
+| `GET`  | `/api/v1/status/cache`               | Cache statistics |
+| `POST` | `/api/v1/cache/clear`                | Clear the cache |
+
+`{team}` accepts a name, ESPN code or alias (`Lakers`, `LAL`, `GSW`). Injury
+data is current-season only; other seasons return `injury_data_available: false`.
 
 ##  Tech Stack
 
@@ -108,6 +113,15 @@ uvicorn server.main:app --reload
 ```powershell
 pytest
 ```
+
+## Project status
+
+Working: ESPN clients, API manager (cache, retries), FastAPI server, Streamlit
+dashboard (stats, scoreboard, standings, comparison).
+
+Not implemented yet (empty placeholder files): `analytics/` (Monte Carlo,
+stats calculator, chart builders), `data/` (models, persistence, processors)
+and `api/cache_manager.py`.
 
 ## Security
 
