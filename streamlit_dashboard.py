@@ -15,7 +15,10 @@ from dotenv import load_dotenv
 
 from api.nba_api_client import TEAM_NAME_TO_ID, resolve_team
 from api.sportsdata_api_client import current_season
-from analytics.visualizations import health_label, format_health
+from analytics.visualizations import (
+    health_label, format_health, status_css,
+    filter_by_status, present_statuses,
+)
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -187,15 +190,29 @@ def render_health(team, season, data):
     elif not players:
         st.success("Sin lesionados reportados.")
     else:
-        st.dataframe(
-            pd.DataFrame([{
+        statuses = present_statuses(players)
+        selected = st.multiselect(
+            "Filtrar por estado", statuses, default=statuses,
+            key=f"injury_status_{team}_{season}",
+        )
+        shown = filter_by_status(players, selected)
+        if not shown:
+            st.info("Ningún jugador coincide con el filtro de estado.")
+        else:
+            df = pd.DataFrame([{
                 "Jugador": p["player_name"],
                 "Estado": p["status"],
                 "Disponible": "Sí" if p["available"] else "No",
                 "Comentario": p["short_comment"],
-            } for p in players]),
-            use_container_width=True, hide_index=True
-        )
+            } for p in shown])
+            styler = df.style
+            # Styler.map reemplaza a applymap desde pandas 2.1
+            style_cells = getattr(styler, "map", None) or styler.applymap
+            st.dataframe(
+                style_cells(status_css, subset=["Estado"]),
+                use_container_width=True, hide_index=True
+            )
+        st.caption("Fuera = Out · Suspendido = Suspension · Día a día = Day-To-Day")
 
 # ─── UI ───────────────────────────────────────────────────────────────────────
 
