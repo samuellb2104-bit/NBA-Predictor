@@ -14,28 +14,15 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 from api.nba_api_client import TEAM_NAME_TO_ID, resolve_team
+from api.sportsdata_api_client import current_season
 from analytics.visualizations import health_label, format_health
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
 
-def get_current_nba_season() -> int:
-    """'year' que espera la API: el año en que TERMINA la temporada
-    (convención de ESPN — confirmado empíricamente: year=2024 devuelve
-    los resultados reales de la temporada 2023-24).
-
-    La temporada corre de octubre a junio. Si estamos en octubre-diciembre
-    ya arrancó la que termina el año siguiente; en receso (jul-sep) se
-    adelanta a la que está por comenzar, aunque todavía no tenga datos.
-    """
-    now = datetime.now()
-    if now.month >= 7:
-        return now.year + 1
-    return now.year
-
-
-CURRENT_SEASON = get_current_nba_season()
+# Fuente única de la regla de temporada (cambia en octubre, igual que ESPN).
+CURRENT_SEASON = current_season()
 
 st.set_page_config(page_title="NBA Predictor", layout="wide")
 
@@ -89,12 +76,6 @@ def run_async(coro):
         return asyncio.run(coro)
 
 @st.cache_data(ttl=3600)
-def get_team_stats(team, season):
-    if not api_ok:
-        return None
-    return nba_client.get_team_stats(team, season)
-
-@st.cache_data(ttl=3600)
 def get_standings(season):
     if not api_ok:
         return []
@@ -128,26 +109,40 @@ def get_scoreboard(date_str):
         st.warning(f"Scoreboard no disponible: {e}")
         return []
 
+class _InjuryFetchFailed(Exception):
+    """Lleva los datos (dict) de un resultado con fetch_failed=True."""
+    def __init__(self, data):
+        super().__init__("no se pudo consultar el reporte de lesiones")
+        self.data = data
+
 @st.cache_data(ttl=600)
-def _fetch_health(team, season):
-    # dict plano (asdict) por el pickle de st.cache_data; si falla lanza
-    # excepción y así no se cachea el error.
+def _fetch_team_data(team, season):
+    # dict plano (asdict) por el pickle de st.cache_data. Si fetch_failed es
+    # True se lanza una excepción: st.cache_data no cachea excepciones, así el
+    # fallo transitorio se reintenta en el próximo render. get_team_data
+    # recupera los datos del equipo desde la excepción.
     enriched = run_async(manager.get_enriched_team_stats(team, season))
     if enriched is None:
         raise RuntimeError("sin stats del equipo")
-    return asdict(enriched)
+    data = asdict(enriched)
+    if data["fetch_failed"]:
+        raise _InjuryFetchFailed(data)
+    return data
 
 @st.cache_data(ttl=600)
 def _fetch_injured_players(team, season):
     players = run_async(sportsdata_client.get_player_availability(team, season))
     return [asdict(p) for p in players]
 
-def get_health(team, season):
-    """Devuelve (dict de salud | None, error | None) sin romper la UI."""
+def get_team_data(team, season):
+    """Devuelve (dict stats+salud | None, error | None) sin romper la UI.
+    Una sola llamada por equipo cubre stats y salud."""
     if not api_ok:
         return None, "APIs no inicializadas"
     try:
-        return _fetch_health(team, season), None
+        return _fetch_team_data(team, season), None
+    except _InjuryFetchFailed as e:
+        return e.data, None
     except Exception as e:
         return None, str(e)
 
@@ -158,23 +153,25 @@ def get_injured_players(team, season):
     except Exception as e:
         return None, str(e)
 
-def no_injury_msg(season):
-    """Mensaje cuando injury_data_available es False."""
-    if season == CURRENT_SEASON:
-        return "No se pudo obtener el reporte de lesiones ahora mismo. Intenta de nuevo más tarde."
-    return ("Sin datos de lesiones para esta temporada "
-            "(ESPN solo publica el reporte vigente).")
+def injury_notice(data):
+    """('warning'|'info'|None, mensaje) según fetch_failed / injury_data_available."""
+    if data["fetch_failed"]:
+        return "warning", "No se pudo consultar el reporte de lesiones ahora mismo."
+    if not data["injury_data_available"]:
+        return "info", "Sin datos de lesiones para esta temporada."
+    return None, None
 
-def render_health(team, season):
+def render_health(team, season, data):
     """Sección de salud/lesiones de un equipo (tab Stats)."""
     st.subheader(f"🩺 Salud del plantel — {team}")
-    health, err = get_health(team, season)
-    if health is None:
-        st.warning(f"Salud no disponible: {err}")
+    if data is None:
+        st.warning("Salud no disponible: sin datos del equipo")
         return
-    if not health["injury_data_available"]:
-        st.info(no_injury_msg(season))
+    kind, msg = injury_notice(data)
+    if kind:
+        getattr(st, kind)(msg)
         return
+    health = data
 
     label, color = health_label(health["team_health_score"], True)
     c1, c2, c3 = st.columns(3)
@@ -232,18 +229,21 @@ with tab1:
         team_sel = st.selectbox("Equipo", TEAMS, index=team_index("Lakers"))
 
         with st.spinner(f"Cargando {team_sel}..."):
-            stats = get_team_stats(team_sel, season)
+            stats, stats_err = get_team_data(team_sel, season)
 
         if stats:
-            st.metric("Wins", stats["wins"])
-            st.metric("Losses", stats["losses"])
-            st.metric("Win %", f"{stats['win_pct']:.1%}")
-            st.metric("PPG", stats["points"])
+            m1, m2 = st.columns(2)
+            m1.metric("Wins", stats["wins"])
+            m2.metric("Losses", stats["losses"])
+            m1.metric("Win %", f"{stats['win_pct']:.1%}")
+            m2.metric("PPG", f"{stats['points']:.1f}")
+            if stats["streak"]:
+                st.metric("Racha", stats["streak"])
         else:
-            st.warning("Sin datos — verifica conexión a NBA API")
+            st.warning(f"Sin datos — verifica conexión a ESPN ({stats_err})")
 
         st.divider()
-        render_health(team_sel, season)
+        render_health(team_sel, season, stats)
 
     with col2:
         st.subheader(f"Últimos 10 juegos — {team_sel}")
@@ -352,8 +352,8 @@ with tab4:
 
     if st.button("⚡ Comparar equipos"):
         with st.spinner("Cargando datos..."):
-            stats_a = get_team_stats(team_a, season)
-            stats_b = get_team_stats(team_b, season)
+            stats_a, _ = get_team_data(team_a, season)
+            stats_b, _ = get_team_data(team_b, season)
 
         if stats_a and stats_b:
             # Comparación Win% y PPG (únicas métricas que la API provee)
@@ -390,13 +390,11 @@ with tab4:
             health_cols = st.columns(2)
             for hc, tm in zip(health_cols, (team_a, team_b)):
                 with hc:
-                    h, herr = get_health(tm, season)
-                    if h is None:
-                        st.warning(f"{tm}: salud no disponible ({herr})")
-                    elif not h["injury_data_available"]:
-                        st.info(f"**{tm}**: {no_injury_msg(season)}")
+                    h = stats_a if tm == team_a else stats_b
+                    kind, msg = injury_notice(h)
+                    if kind:
+                        getattr(st, kind)(f"**{tm}**: {msg}")
                     else:
-                        lbl, col = health_label(h["team_health_score"], True)
                         st.metric(
                             tm, format_health(h["team_health_score"], True),
                             f"{h['injured_players']} lesionados, "
