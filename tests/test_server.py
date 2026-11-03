@@ -106,14 +106,35 @@ class TestApp:
         assert data["team"] == "LAL"
         assert data["record"]["wins"] == 47
         assert data["health"]["injury_data_available"] is True
+        assert data["health"]["fetch_failed"] is False
+        assert data["record"]["points"] == 0.0
+        assert data["record"]["streak"] == ""
 
     def test_team_stats_past_season_flags_no_injury_data(self, client):
         data = client.get("/api/v1/teams/LAL/stats?season=2024").json()["data"]
         assert data["health"]["injury_data_available"] is False
+        assert data["health"]["fetch_failed"] is False
+
+    def test_team_stats_fetch_failure_current_season(self, client):
+        client.app.state.api_manager.sportsdata_client.get_player_availability = AsyncMock(
+            side_effect=Exception("boom"))
+        data = client.get("/api/v1/teams/LAL/stats?season=2025").json()["data"]
+        assert data["health"]["injury_data_available"] is False
+        assert data["health"]["fetch_failed"] is True
+        rows = client.get("/api/v1/teams?teams=LAL&season=2025").json()["data"]
+        assert rows[0]["fetch_failed"] is True
+
+    def test_team_stats_points_and_streak(self, client):
+        client.app.state.api_manager.nba_client.get_team_stats = MagicMock(
+            return_value={"wins": 1, "losses": 1, "win_pct": 0.5, "points": 114.26, "streak": "L2"})
+        rec = client.get("/api/v1/teams/LAL/stats?season=2025").json()["data"]["record"]
+        assert rec["points"] == 114.3
+        assert rec["streak"] == "L2"
 
     def test_all_teams_and_compare_surface_injury_flag(self, client):
         rows = client.get("/api/v1/teams?teams=LAL&season=2025").json()["data"]
         assert rows[0]["injury_data_available"] is True
+        assert rows[0]["fetch_failed"] is False
         client.app.state.api_manager.nba_client.get_team_stats = MagicMock(
             return_value={"wins": 40, "losses": 42, "win_pct": 0.49})
         cmp = client.get("/api/v1/compare/teams?team1=LAL&team2=BOS&season=2025").json()

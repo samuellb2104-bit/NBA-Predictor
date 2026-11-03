@@ -108,6 +108,7 @@ class TestNBAApiClient:
         assert stats["team"] == "Lakers"
         assert stats["wins"] == 47
         assert stats["points"] == 115.5
+        assert stats["streak"] == "W2"
         # No expuesto por la API pública de ESPN — ver notas en api_manager
         assert stats["assists"] == 0.0
 
@@ -430,7 +431,44 @@ class TestAPIManager:
 
         assert stats is not None
         assert stats.injury_data_available is False
+        assert stats.fetch_failed is True
         assert stats.team_health_score == 1.0
+
+    @pytest.mark.asyncio
+    async def test_fetch_failed_false_on_success_and_past_season(self, api_manager):
+        ok = await api_manager.get_enriched_team_stats("LAL", 2025)
+        past = await api_manager.get_enriched_team_stats("LAL", 2024)
+        assert ok.fetch_failed is False
+        assert past.fetch_failed is False
+        assert past.injury_data_available is False
+
+    @pytest.mark.asyncio
+    async def test_failed_fetch_is_not_cached(self, api_manager, mock_sportsdata_client):
+        mock_sportsdata_client.get_player_availability = AsyncMock(side_effect=Exception("boom"))
+        first = await api_manager.get_enriched_team_stats("LAL", 2025)
+        assert first.fetch_failed is True
+        assert "team:LAL:2025" not in api_manager.cache
+
+        # Recuperación: el siguiente request reintenta y sí se cachea.
+        mock_sportsdata_client.get_player_availability = AsyncMock(return_value=[])
+        second = await api_manager.get_enriched_team_stats("LAL", 2025)
+        assert second.fetch_failed is False
+        assert second.injury_data_available is True
+        assert "team:LAL:2025" in api_manager.cache
+
+    @pytest.mark.asyncio
+    async def test_points_and_streak_carried_from_team_stats(self, api_manager, mock_nba_client):
+        mock_nba_client.get_team_stats = MagicMock(return_value={
+            "wins": 45, "losses": 20, "win_pct": 0.692, "points": 115.4, "streak": "W3"})
+        stats = await api_manager.get_enriched_team_stats("LAL", 2025)
+        assert stats.points == 115.4
+        assert stats.streak == "W3"
+
+    @pytest.mark.asyncio
+    async def test_points_and_streak_default_when_missing(self, api_manager):
+        stats = await api_manager.get_enriched_team_stats("LAL", 2025)
+        assert stats.points == 0.0
+        assert stats.streak == ""
 
     @pytest.mark.asyncio
     async def test_compare_teams_health_includes_injury_data_flag(self, api_manager):
@@ -438,6 +476,7 @@ class TestAPIManager:
 
         assert result["LAL"]["injury_data_available"] is True
         assert result["BOS"]["injury_data_available"] is True
+        assert result["LAL"]["fetch_failed"] is False
 
     @pytest.mark.asyncio
     async def test_get_enriched_team_stats_missing_team_returns_none(self, api_manager, mock_nba_client):

@@ -94,7 +94,9 @@ async def get_team_stats(
                 "record": {
                     "wins": stats.wins,
                     "losses": stats.losses,
-                    "win_pct": round(stats.win_pct, 3)
+                    "win_pct": round(stats.win_pct, 3),
+                    "points": round(stats.points, 1),
+                    "streak": stats.streak
                 },
                 "health": {
                     "health_score": round(stats.team_health_score, 3),
@@ -102,7 +104,8 @@ async def get_team_stats(
                     "injured_players": stats.injured_players,
                     "unavailable_players": stats.unavailable_players,
                     "critical_absences": stats.critical_absences,
-                    "injury_data_available": stats.injury_data_available
+                    "injury_data_available": stats.injury_data_available,
+                    "fetch_failed": stats.fetch_failed
                 },
                 "projections": {
                     "base_win_pct": round(stats.win_pct, 3),
@@ -184,6 +187,7 @@ async def get_all_teams_stats(
                     "health_score": round(stats.team_health_score, 3),
                     "injured_players": stats.injured_players,
                     "injury_data_available": stats.injury_data_available,
+                    "fetch_failed": stats.fetch_failed,
                     "adjusted_win_pct": round(stats.projected_win_pct_adjusted, 3)
                 }
                 for team, stats in sorted_stats

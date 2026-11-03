@@ -198,6 +198,7 @@ class NBAApiClient:
             "losses": entry["losses"],
             "win_pct": entry["win_pct"],
             "points": entry.get("points", 0.0),
+            "streak": entry.get("streak", ""),
             "assists": 0.0,
             "rebounds": 0.0,
             "fg_pct": 0.0,

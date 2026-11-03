@@ -69,6 +69,12 @@ class EnrichedTeamStats:
     # False si la temporada no es la actual (ESPN solo da lesiones vigentes)
     # o falló la consulta: distingue "sin lesiones" de "sin datos".
     injury_data_available: bool = True
+    # True solo si se intentó la consulta de lesiones (temporada actual) y falló.
+    # False en éxito y en temporadas pasadas (donde no se intenta nada).
+    fetch_failed: bool = False
+    # Stats básicos de standings
+    points: float = 0.0  # PPG
+    streak: str = ""  # ej. "W3", "L1"
 
 
 class APIManager:
@@ -186,6 +192,7 @@ class APIManager:
             # Lesiones: ESPN solo publica el reporte vigente, no histórico.
             player_availability = []
             injury_data_available = False
+            fetch_failed = False
             if is_current_season(season):
                 try:
                     player_availability = await self.sportsdata_client.get_player_availability(
@@ -194,6 +201,7 @@ class APIManager:
                     )
                     injury_data_available = True
                 except Exception as e:
+                    fetch_failed = True
                     logger.warning(f"⚠️ Sin datos de lesiones para {team}: {e}")
 
             injured_count = len(player_availability)
@@ -223,10 +231,15 @@ class APIManager:
                 team_health_score=team_health_score,
                 projected_win_pct_adjusted=projected_win_pct_adjusted,
                 critical_absences=critical_absences,
-                injury_data_available=injury_data_available
+                injury_data_available=injury_data_available,
+                fetch_failed=fetch_failed,
+                points=float(team_stats.get("points", 0.0) or 0.0),
+                streak=team_stats.get("streak", "") or ""
             )
 
-            self._set_cache(cache_key, enriched, DataSource.SPORTSDATA)
+            # Un fallo transitorio no se cachea: el siguiente request reintenta.
+            if not fetch_failed:
+                self._set_cache(cache_key, enriched, DataSource.SPORTSDATA)
             return enriched
 
         except Exception as e:
@@ -298,14 +311,16 @@ class APIManager:
                 "injured_players": stats1.injured_players,
                 "critical_absences": stats1.critical_absences,
                 "adjusted_win_pct": stats1.projected_win_pct_adjusted,
-                "injury_data_available": stats1.injury_data_available
+                "injury_data_available": stats1.injury_data_available,
+                "fetch_failed": stats1.fetch_failed
             },
             team2: {
                 "health_score": stats2.team_health_score,
                 "injured_players": stats2.injured_players,
                 "critical_absences": stats2.critical_absences,
                 "adjusted_win_pct": stats2.projected_win_pct_adjusted,
-                "injury_data_available": stats2.injury_data_available
+                "injury_data_available": stats2.injury_data_available,
+                "fetch_failed": stats2.fetch_failed
             },
             "health_advantage": team1 if stats1.team_health_score > stats2.team_health_score else team2
         }
