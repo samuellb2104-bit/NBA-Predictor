@@ -17,11 +17,11 @@ TEAM_NAME_TO_ID = {
     "Lakers": "13", "Celtics": "2", "Heat": "14", "Nuggets": "7",
     "Warriors": "9", "Bucks": "15", "Suns": "21", "Clippers": "12",
     "76ers": "20", "Nets": "17", "Knicks": "18", "Bulls": "4",
-    "Cavaliers": "5", "Hawks": "1", "Hornets": "3", "Pistons": "8",
+    "Cavaliers": "5", "Hawks": "1", "Hornets": "30", "Pistons": "8",
     "Pacers": "11", "Magic": "19", "Wizards": "27", "Raptors": "28",
-    "Mavericks": "6", "Rockets": "10", "Grizzlies": "29", "Pelicans": "16",
-    "Spurs": "22", "Thunder": "25", "Trail Blazers": "23", "Jazz": "26",
-    "Kings": "24", "Timberwolves": "30",
+    "Mavericks": "6", "Rockets": "10", "Grizzlies": "29", "Pelicans": "3",
+    "Spurs": "24", "Thunder": "25", "Trail Blazers": "22", "Jazz": "26",
+    "Kings": "23", "Timberwolves": "16",
 }
 
 # Nombre -> abreviatura de ESPN (la que devuelve el endpoint de standings).
