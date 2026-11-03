@@ -7,6 +7,7 @@ import streamlit as st
 import plotly.express as px
 import pandas as pd
 import asyncio
+from dataclasses import asdict
 import os
 import logging
 from datetime import datetime
@@ -102,7 +103,8 @@ def get_recent_games(team, season):
     async def _fetch():
         return await sportsdata_client.get_team_recent_games(team_id, season)
     try:
-        return run_async(_fetch())
+        # dicts en vez de Scoreboard: st.cache_data usa pickle y falla si el módulo se recarga
+        return [asdict(g) for g in run_async(_fetch())]
     except Exception as e:
         st.warning(f"Historial no disponible: {e}")
         return []
@@ -112,7 +114,7 @@ def get_scoreboard(date_str):
     async def _fetch():
         return await sportsdata_client.get_scoreboard(date_str)
     try:
-        return run_async(_fetch())
+        return [asdict(g) for g in run_async(_fetch())]
     except Exception as e:
         st.warning(f"Scoreboard no disponible: {e}")
         return []
@@ -167,12 +169,12 @@ with tab1:
         if games:
             rows = []
             for g in games:
-                is_home = team_sel in g.home_team
-                team_score = g.home_score if is_home else g.away_score
-                opp_score = g.away_score if is_home else g.home_score
+                is_home = team_sel in g["home_team"]
+                team_score = g["home_score"] if is_home else g["away_score"]
+                opp_score = g["away_score"] if is_home else g["home_score"]
                 rows.append({
-                    "Fecha": f"{g.date[:4]}-{g.date[4:6]}-{g.date[6:]}",
-                    "Rival": g.away_team if is_home else g.home_team,
+                    "Fecha": f"{g['date'][:4]}-{g['date'][4:6]}-{g['date'][6:]}",
+                    "Rival": g["away_team"] if is_home else g["home_team"],
                     "L/V": "Local" if is_home else "Visita",
                     "Resultado": "W" if team_score > opp_score else "L",
                     "Puntos": team_score,
@@ -214,15 +216,15 @@ with tab2:
             with st.container():
                 col1, col2, col3 = st.columns([2, 1, 2])
                 with col1:
-                    st.markdown(f"### {game.away_team}")
-                    st.metric("Score", game.away_score)
+                    st.markdown(f"### {game['away_team']}")
+                    st.metric("Score", game["away_score"])
                 with col2:
-                    st.markdown(f"**{game.status}**")
-                    if game.period:
-                        st.caption(f"Period {game.period}")
+                    st.markdown(f"**{game['status']}**")
+                    if game["period"]:
+                        st.caption(f"Period {game['period']}")
                 with col3:
-                    st.markdown(f"### {game.home_team}")
-                    st.metric("Score", game.home_score)
+                    st.markdown(f"### {game['home_team']}")
+                    st.metric("Score", game["home_score"])
                 st.divider()
     else:
         st.info("Sin partidos para esta fecha o API no disponible")
