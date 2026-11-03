@@ -13,7 +13,7 @@ import logging
 from datetime import datetime
 from dotenv import load_dotenv
 
-from api.nba_api_client import TEAM_NAME_TO_ID
+from api.nba_api_client import TEAM_NAME_TO_ID, resolve_team
 from analytics.visualizations import health_label, format_health
 
 load_dotenv()
@@ -66,8 +66,16 @@ except Exception as e:
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-TEAMS = ["Lakers", "Celtics", "Heat", "Nuggets", "Warriors",
-         "Bucks", "Suns", "Clippers", "76ers", "Nets"]
+# Los 30 equipos, derivados de la fuente única (TEAM_NAME_TO_ID), en orden alfabético.
+TEAMS = sorted(TEAM_NAME_TO_ID)
+
+def team_index(name, default=0):
+    return TEAMS.index(name) if name in TEAMS else default
+
+def is_home_team(team_name, home_team_full):
+    # Compara por id de ESPN (resolve_team), no por substring del nombre completo.
+    home = resolve_team(home_team_full)
+    return home is not None and home.id == TEAM_NAME_TO_ID.get(team_name)
 
 def run_async(coro):
     try:
@@ -221,7 +229,7 @@ with tab1:
 
     with col1:
         st.subheader("Team Stats")
-        team_sel = st.selectbox("Equipo", TEAMS)
+        team_sel = st.selectbox("Equipo", TEAMS, index=team_index("Lakers"))
 
         with st.spinner(f"Cargando {team_sel}..."):
             stats = get_team_stats(team_sel, season)
@@ -245,7 +253,7 @@ with tab1:
         if games:
             rows = []
             for g in games:
-                is_home = team_sel in g["home_team"]
+                is_home = is_home_team(team_sel, g["home_team"])
                 team_score = g["home_score"] if is_home else g["away_score"]
                 opp_score = g["away_score"] if is_home else g["home_score"]
                 rows.append({
@@ -338,9 +346,9 @@ with tab4:
     col1, col2 = st.columns(2)
 
     with col1:
-        team_a = st.selectbox("Equipo A", TEAMS, index=0)
+        team_a = st.selectbox("Equipo A", TEAMS, index=team_index("Lakers"))
     with col2:
-        team_b = st.selectbox("Equipo B", TEAMS, index=1)
+        team_b = st.selectbox("Equipo B", TEAMS, index=team_index("Celtics", 1))
 
     if st.button("⚡ Comparar equipos"):
         with st.spinner("Cargando datos..."):
