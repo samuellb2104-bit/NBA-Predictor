@@ -14,6 +14,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 from api.nba_api_client import TEAM_NAME_TO_ID
+from analytics.visualizations import health_label, format_health
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -119,6 +120,78 @@ def get_scoreboard(date_str):
         st.warning(f"Scoreboard no disponible: {e}")
         return []
 
+@st.cache_data(ttl=600)
+def _fetch_health(team, season):
+    # dict plano (asdict) por el pickle de st.cache_data; si falla lanza
+    # excepción y así no se cachea el error.
+    enriched = run_async(manager.get_enriched_team_stats(team, season))
+    if enriched is None:
+        raise RuntimeError("sin stats del equipo")
+    return asdict(enriched)
+
+@st.cache_data(ttl=600)
+def _fetch_injured_players(team, season):
+    players = run_async(sportsdata_client.get_player_availability(team, season))
+    return [asdict(p) for p in players]
+
+def get_health(team, season):
+    """Devuelve (dict de salud | None, error | None) sin romper la UI."""
+    if not api_ok:
+        return None, "APIs no inicializadas"
+    try:
+        return _fetch_health(team, season), None
+    except Exception as e:
+        return None, str(e)
+
+def get_injured_players(team, season):
+    """Devuelve (lista de jugadores | None, error | None)."""
+    try:
+        return _fetch_injured_players(team, season), None
+    except Exception as e:
+        return None, str(e)
+
+def no_injury_msg(season):
+    """Mensaje cuando injury_data_available es False."""
+    if season == CURRENT_SEASON:
+        return "No se pudo obtener el reporte de lesiones ahora mismo. Intenta de nuevo más tarde."
+    return ("Sin datos de lesiones para esta temporada "
+            "(ESPN solo publica el reporte vigente).")
+
+def render_health(team, season):
+    """Sección de salud/lesiones de un equipo (tab Stats)."""
+    st.subheader(f"🩺 Salud del plantel — {team}")
+    health, err = get_health(team, season)
+    if health is None:
+        st.warning(f"Salud no disponible: {err}")
+        return
+    if not health["injury_data_available"]:
+        st.info(no_injury_msg(season))
+        return
+
+    label, color = health_label(health["team_health_score"], True)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Health score", f"{health['team_health_score']:.0%}")
+    c2.metric("Lesionados", health["injured_players"])
+    c3.metric("No disponibles", health["unavailable_players"])
+    st.markdown(f"Estado: <span style='color:{color};font-weight:bold'>{label}</span>",
+                unsafe_allow_html=True)
+
+    players, perr = get_injured_players(team, season)
+    if players is None:
+        st.warning(f"Lista de lesionados no disponible: {perr}")
+    elif not players:
+        st.success("Sin lesionados reportados.")
+    else:
+        st.dataframe(
+            pd.DataFrame([{
+                "Jugador": p["player_name"],
+                "Estado": p["status"],
+                "Disponible": "Sí" if p["available"] else "No",
+                "Comentario": p["short_comment"],
+            } for p in players]),
+            use_container_width=True, hide_index=True
+        )
+
 # ─── UI ───────────────────────────────────────────────────────────────────────
 
 st.title(f"🏀 NBA Predictor {CURRENT_SEASON - 1}-{str(CURRENT_SEASON)[-2:]}")
@@ -160,6 +233,9 @@ with tab1:
             st.metric("PPG", stats["points"])
         else:
             st.warning("Sin datos — verifica conexión a NBA API")
+
+        st.divider()
+        render_health(team_sel, season)
 
     with col2:
         st.subheader(f"Últimos 10 juegos — {team_sel}")
@@ -300,6 +376,25 @@ with tab4:
                 ],
             })
             st.dataframe(df_comp, use_container_width=True)
+
+            # Salud / lesiones (sin datos -> se dice, no se muestra 1.0 como sano)
+            st.markdown("#### 🩺 Salud del plantel")
+            health_cols = st.columns(2)
+            for hc, tm in zip(health_cols, (team_a, team_b)):
+                with hc:
+                    h, herr = get_health(tm, season)
+                    if h is None:
+                        st.warning(f"{tm}: salud no disponible ({herr})")
+                    elif not h["injury_data_available"]:
+                        st.info(f"**{tm}**: {no_injury_msg(season)}")
+                    else:
+                        lbl, col = health_label(h["team_health_score"], True)
+                        st.metric(
+                            tm, format_health(h["team_health_score"], True),
+                            f"{h['injured_players']} lesionados, "
+                            f"{h['unavailable_players']} no disponibles",
+                            delta_color="off",
+                        )
 
             # Predicción
             winner = team_a if stats_a["win_pct"] > stats_b["win_pct"] else team_b
